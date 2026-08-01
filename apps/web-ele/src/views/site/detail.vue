@@ -1,0 +1,408 @@
+<script lang="ts" setup>
+import { computed, onMounted, ref } from "vue";
+import { useRoute } from "vue-router";
+
+import {
+  ElAlert,
+  ElButton,
+  ElCard,
+  ElDescriptions,
+  ElDescriptionsItem,
+  ElDialog,
+  ElInput,
+  ElMessage,
+  ElMessageBox,
+  ElSwitch,
+  ElTable,
+  ElTableColumn,
+  ElTabPane,
+  ElTabs,
+  ElTag,
+} from "element-plus";
+
+import {
+  bindDomainApi,
+  dbCheckApi,
+  getSiteDetailApi,
+  provisionCheckApi,
+  setMainDomainApi,
+  setSiteStatusApi,
+  type SiteApi,
+  unbindDomainApi,
+} from "#/api/core/site";
+import {
+  getConfigHistoryApi,
+  getCurrentConfigApi,
+  publishConfigApi,
+  rollbackConfigApi,
+  type SiteConfigApi,
+} from "#/api/core/siteconfig";
+
+defineOptions({ name: "SiteDetail" });
+
+const route = useRoute();
+const siteId = Number(route.query.id);
+const detail = ref<SiteApi.SiteDetail | null>(null);
+const activeTab = ref("info");
+
+const statusTag: Record<number, { label: string; type: "info" | "success" | "danger" }> = {
+  0: { label: "筹备", type: "info" },
+  1: { label: "上线", type: "success" },
+  2: { label: "停用", type: "danger" },
+};
+
+async function fetchDetail() {
+  detail.value = await getSiteDetailApi(siteId);
+}
+
+// ---------- db-check ----------
+const dbChecking = ref(false);
+const dbResult = ref<SiteApi.DbCheckData | null>(null);
+async function handleDbCheck() {
+  dbChecking.value = true;
+  dbResult.value = null;
+  try {
+    dbResult.value = await dbCheckApi(siteId);
+  } finally {
+    dbChecking.value = false;
+  }
+}
+
+// ---------- 域名 ----------
+const newDomain = ref("");
+const newHttps = ref(true);
+const domainLoading = ref(false);
+async function handleBindDomain() {
+  if (!newDomain.value) {
+    ElMessage.warning("请输入域名");
+    return;
+  }
+  domainLoading.value = true;
+  try {
+    await bindDomainApi(siteId, newDomain.value, newHttps.value ? 1 : 0);
+    ElMessage.success("绑定成功(首个域名自动设为主域名)");
+    newDomain.value = "";
+    fetchDetail();
+  } finally {
+    domainLoading.value = false;
+  }
+}
+async function handleUnbind(d: SiteApi.DomainItem) {
+  await ElMessageBox.confirm(`确认解绑域名 ${d.domain}?`, "提示", { type: "warning" });
+  await unbindDomainApi(siteId, d.id);
+  ElMessage.success("解绑成功");
+  fetchDetail();
+}
+async function handleSetMain(d: SiteApi.DomainItem) {
+  await setMainDomainApi(siteId, d.id);
+  ElMessage.success("已设为主域名");
+  fetchDetail();
+}
+
+// ---------- 开站清单(FM4) ----------
+const provisionLoading = ref(false);
+const provision = ref<SiteApi.ProvisionData | null>(null);
+async function handleProvisionCheck() {
+  provisionLoading.value = true;
+  try {
+    provision.value = await provisionCheckApi(siteId);
+  } finally {
+    provisionLoading.value = false;
+  }
+}
+const canOnline = computed(
+  () => provision.value?.all_passed === true && detail.value?.status !== 1
+);
+async function handleSetStatus(status: number) {
+  const names: Record<number, string> = { 0: "筹备", 1: "上线", 2: "停用" };
+  await ElMessageBox.confirm(`确认将站点置为「${names[status]}」?`, "提示", {
+    type: "warning",
+  });
+  await setSiteStatusApi(siteId, status);
+  ElMessage.success("状态已更新");
+  fetchDetail();
+  if (status === 1) provision.value = null;
+}
+
+// ---------- 配置发布(FM3) ----------
+const current = ref<SiteConfigApi.CurrentData | null>(null);
+const editContent = ref("");
+const publishRemark = ref("");
+const publishing = ref(false);
+const historyData = ref<SiteConfigApi.HistoryItem[]>([]);
+const historyTotal = ref(0);
+const viewDialog = ref(false);
+const viewContent = ref("");
+
+async function loadConfigTab() {
+  const [cur, his] = await Promise.all([
+    getCurrentConfigApi(siteId),
+    getConfigHistoryApi(siteId, 1, 20),
+  ]);
+  current.value = cur;
+  historyData.value = his.list || [];
+  historyTotal.value = his.total || 0;
+  // 编辑器默认带入最近一次发布的原文(不含注入的 database 段)
+  if (!editContent.value && historyData.value.length > 0) {
+    editContent.value = historyData.value[0]!.content;
+  }
+}
+
+async function handlePublish() {
+  if (!editContent.value.trim()) {
+    ElMessage.warning("配置内容不能为空");
+    return;
+  }
+  await ElMessageBox.confirm(
+    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? database 段将自动注入登记的DB信息。`,
+    "发布确认",
+    { type: "warning" }
+  );
+  publishing.value = true;
+  try {
+    const res = await publishConfigApi(siteId, editContent.value, publishRemark.value);
+    ElMessage.success(`发布成功, 版本 v${res.version}`);
+    publishRemark.value = "";
+    loadConfigTab();
+  } finally {
+    publishing.value = false;
+  }
+}
+
+async function handleRollback(item: SiteConfigApi.HistoryItem) {
+  await ElMessageBox.confirm(
+    `确认回滚到 v${item.version}? 将生成新版本并立即发布到 Nacos。`,
+    "回滚确认",
+    { type: "warning" }
+  );
+  const res = await rollbackConfigApi(siteId, item.version);
+  ElMessage.success(`回滚成功, 新版本 v${res.version}`);
+  loadConfigTab();
+}
+
+function handleViewHistory(item: SiteConfigApi.HistoryItem) {
+  viewContent.value = item.content;
+  viewDialog.value = true;
+}
+
+function handleLoadToEditor(item: SiteConfigApi.HistoryItem) {
+  editContent.value = item.content;
+  ElMessage.success(`v${item.version} 已载入编辑器(未发布)`);
+}
+
+function onTabChange(name: string | number) {
+  if (name === "config") loadConfigTab();
+  if (name === "provision") handleProvisionCheck();
+}
+
+onMounted(fetchDetail);
+</script>
+
+<template>
+  <div class="p-5">
+    <ElCard v-if="detail" shadow="never">
+      <div class="mb-4 flex items-center gap-3">
+        <h2 class="text-lg font-semibold">
+          {{ detail.name }}
+          <span class="text-muted-foreground ml-2 text-sm">{{ detail.site_code }}</span>
+        </h2>
+        <ElTag :type="statusTag[detail.status]?.type">
+          {{ statusTag[detail.status]?.label }}
+        </ElTag>
+        <ElTag type="info">{{ detail.env }}</ElTag>
+        <div class="flex-1"></div>
+        <ElButton v-if="detail.status !== 2" type="danger" plain @click="handleSetStatus(2)">
+          停用
+        </ElButton>
+        <ElButton v-if="detail.status === 2" type="info" plain @click="handleSetStatus(0)">
+          恢复筹备
+        </ElButton>
+      </div>
+
+      <ElTabs v-model="activeTab" @tab-change="onTabChange">
+        <!-- 基本信息 + DB -->
+        <ElTabPane label="基本信息" name="info">
+          <ElDescriptions :column="2" border>
+            <ElDescriptionsItem label="所属商户">{{ detail.merchant_name }}</ElDescriptionsItem>
+            <ElDescriptionsItem label="创建时间">{{ detail.created_at }}</ElDescriptionsItem>
+            <ElDescriptionsItem label="DB 地址">
+              {{ detail.db_host }}:{{ detail.db_port }}
+            </ElDescriptionsItem>
+            <ElDescriptionsItem label="DB 库/账号">
+              {{ detail.db_name }} / {{ detail.db_user }}(密码 ******)
+            </ElDescriptionsItem>
+            <ElDescriptionsItem label="备注" :span="2">{{ detail.remark || "-" }}</ElDescriptionsItem>
+          </ElDescriptions>
+          <div class="mt-4 flex items-center gap-3">
+            <ElButton type="primary" :loading="dbChecking" @click="handleDbCheck">
+              连通性校验(db-check)
+            </ElButton>
+            <ElTag v-if="dbResult" :type="dbResult.ok ? 'success' : 'danger'">
+              {{ dbResult.ok ? `连接正常 ${dbResult.latency_ms}ms` : dbResult.message }}
+            </ElTag>
+          </div>
+        </ElTabPane>
+
+        <!-- 域名 -->
+        <ElTabPane label="域名" name="domains">
+          <div class="mb-3 flex items-center gap-2">
+            <ElInput
+              v-model="newDomain"
+              placeholder="如 h5.example.com"
+              style="width: 260px"
+              @keyup.enter="handleBindDomain"
+            />
+            <span class="text-sm">HTTPS</span>
+            <ElSwitch v-model="newHttps" />
+            <ElButton type="primary" :loading="domainLoading" @click="handleBindDomain">
+              绑定域名
+            </ElButton>
+          </div>
+          <ElTable :data="detail.domains" border>
+            <ElTableColumn prop="domain" label="域名" min-width="220" />
+            <ElTableColumn label="主域名" width="90" align="center">
+              <template #default="{ row }">
+                <ElTag v-if="row.is_main === 1" type="success">主</ElTag>
+                <span v-else>-</span>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn label="HTTPS" width="80" align="center">
+              <template #default="{ row }">{{ row.https === 1 ? "是" : "否" }}</template>
+            </ElTableColumn>
+            <ElTableColumn label="操作" width="180">
+              <template #default="{ row }">
+                <ElButton
+                  v-if="row.is_main !== 1"
+                  link
+                  type="primary"
+                  @click="handleSetMain(row)"
+                >
+                  设为主域名
+                </ElButton>
+                <ElButton
+                  v-if="row.is_main !== 1"
+                  link
+                  type="danger"
+                  @click="handleUnbind(row)"
+                >
+                  解绑
+                </ElButton>
+                <span v-if="row.is_main === 1" class="text-muted-foreground text-xs">
+                  主域名不可解绑
+                </span>
+              </template>
+            </ElTableColumn>
+          </ElTable>
+        </ElTabPane>
+
+        <!-- 开站清单 FM4 -->
+        <ElTabPane label="开站清单" name="provision">
+          <div class="mb-3 flex items-center gap-3">
+            <ElButton type="primary" :loading="provisionLoading" @click="handleProvisionCheck">
+              重新校验
+            </ElButton>
+            <ElButton
+              type="success"
+              :disabled="!canOnline"
+              @click="handleSetStatus(1)"
+            >
+              上线站点
+            </ElButton>
+            <span v-if="detail.status === 1" class="text-sm text-green-600">已上线</span>
+          </div>
+          <ElAlert
+            v-if="provision"
+            :type="provision.all_passed ? 'success' : 'warning'"
+            :title="provision.all_passed ? '五项校验全部通过, 可以上线' : '存在未通过项, 不能上线'"
+            :closable="false"
+            class="mb-3"
+          />
+          <ElTable v-if="provision" :data="provision.items" border>
+            <ElTableColumn prop="name" label="校验项" width="140" />
+            <ElTableColumn label="结果" width="90" align="center">
+              <template #default="{ row }">
+                <ElTag :type="row.ok ? 'success' : 'danger'">
+                  {{ row.ok ? "通过" : "未过" }}
+                </ElTag>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn prop="detail" label="说明" min-width="300" />
+          </ElTable>
+        </ElTabPane>
+
+        <!-- 配置发布 FM3 -->
+        <ElTabPane label="配置发布" name="config">
+          <ElAlert
+            v-if="current"
+            type="info"
+            :closable="false"
+            class="mb-3"
+            :title="`发布目标: ${current.data_id} @ ${current.env}(namespace: ${current.namespace_id || '未配置'}, group: ${current.group})`"
+          />
+          <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <div>
+              <div class="mb-2 flex items-center gap-2">
+                <span class="font-medium">编辑配置(YAML)</span>
+                <span class="text-muted-foreground text-xs">
+                  database 段发布时自动注入, 无需填写
+                </span>
+              </div>
+              <ElInput
+                v-model="editContent"
+                type="textarea"
+                :rows="18"
+                spellcheck="false"
+                style="font-family: monospace"
+                placeholder="server:&#10;  address: ':8001'&#10;logger:&#10;  level: all"
+              />
+              <div class="mt-2 flex items-center gap-2">
+                <ElInput
+                  v-model="publishRemark"
+                  placeholder="发布备注(可选)"
+                  style="width: 240px"
+                />
+                <ElButton type="primary" :loading="publishing" @click="handlePublish">
+                  发布到 Nacos
+                </ElButton>
+              </div>
+            </div>
+            <div>
+              <div class="mb-2 font-medium">
+                当前 Nacos 配置
+                <ElTag v-if="current" size="small" :type="current.exists ? 'success' : 'info'" class="ml-1">
+                  {{ current.exists ? "已存在" : "未发布" }}
+                </ElTag>
+              </div>
+              <pre
+                class="bg-muted max-h-[420px] overflow-auto rounded p-3 text-xs leading-5"
+              >{{ current?.content || "(Nacos 上暂无该站点配置)" }}</pre>
+            </div>
+          </div>
+
+          <div class="mt-5">
+            <div class="mb-2 font-medium">发布历史({{ historyTotal }})</div>
+            <ElTable :data="historyData" border size="small">
+              <ElTableColumn prop="version" label="版本" width="70" align="center">
+                <template #default="{ row }">v{{ row.version }}</template>
+              </ElTableColumn>
+              <ElTableColumn prop="remark" label="备注" min-width="160" show-overflow-tooltip />
+              <ElTableColumn prop="operator" label="操作人ID" width="90" align="center" />
+              <ElTableColumn prop="created_at" label="发布时间" width="170" />
+              <ElTableColumn label="操作" width="200">
+                <template #default="{ row }">
+                  <ElButton link type="primary" @click="handleViewHistory(row)">查看</ElButton>
+                  <ElButton link type="primary" @click="handleLoadToEditor(row)">载入</ElButton>
+                  <ElButton link type="warning" @click="handleRollback(row)">回滚</ElButton>
+                </template>
+              </ElTableColumn>
+            </ElTable>
+          </div>
+        </ElTabPane>
+      </ElTabs>
+    </ElCard>
+
+    <ElDialog v-model="viewDialog" title="历史版本内容" width="640px">
+      <pre class="bg-muted max-h-[480px] overflow-auto rounded p-3 text-xs leading-5">{{ viewContent }}</pre>
+    </ElDialog>
+  </div>
+</template>
