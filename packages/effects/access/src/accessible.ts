@@ -141,6 +141,11 @@ async function generateRoutes(
     if (route.redirect || !route.children || route.children.length === 0) {
       return route;
     }
+    // 父级本身已是页面组件时不要强行 redirect 到首个子路由
+    // (例如站点列表挂隐藏详情页时, 否则会进 /site/detail 且无 id)
+    if (route.component) {
+      return route;
+    }
     const firstChild = route.children[0];
 
     // 如果子路由不是以/开头，则直接返回,这种情况需要计算全部父级的path才能得出正确的path，这里不做处理
