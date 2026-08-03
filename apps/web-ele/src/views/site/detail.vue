@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, onMounted, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 
 import {
   ElAlert,
@@ -41,9 +41,19 @@ import {
 defineOptions({ name: "SiteDetail" });
 
 const route = useRoute();
+const router = useRouter();
 const siteId = Number(route.query.id);
 const detail = ref<SiteApi.SiteDetail | null>(null);
 const activeTab = ref("info");
+
+function ensureSiteId() {
+  if (!Number.isFinite(siteId) || siteId <= 0) {
+    ElMessage.warning("请从站点列表进入详情");
+    void router.replace("/site");
+    return false;
+  }
+  return true;
+}
 
 const statusTag: Record<number, { label: string; type: "info" | "success" | "danger" }> = {
   0: { label: "筹备", type: "info" },
@@ -52,6 +62,7 @@ const statusTag: Record<number, { label: string; type: "info" | "success" | "dan
 };
 
 async function fetchDetail() {
+  if (!ensureSiteId()) return;
   detail.value = await getSiteDetailApi(siteId);
 }
 

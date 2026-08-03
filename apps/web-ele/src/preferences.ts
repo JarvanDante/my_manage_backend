@@ -11,7 +11,7 @@ export const overridesPreferences = defineOverridesPreferences({
     name: import.meta.env.VITE_APP_TITLE,
     authPageLayout: "panel-center",
     // 前端静态路由模式(方案A); 接口权限由后端 Casbin 兜底
-    accessMode: "frontend",
+    accessMode: "backend",
   },
   theme: {
     builtinType: "pink",

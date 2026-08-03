@@ -81,13 +81,22 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   async function logout(redirect: boolean = true) {
-    try {
-      await logoutApi();
-    } catch {
-      // 不做任何处理
+    // 已在登录页且无 token: 本地已登出, 勿再打 logout 接口
+    const token = accessStore.accessToken;
+    if (token) {
+      try {
+        await logoutApi();
+      } catch {
+        // token 已失效等场景静默处理
+      }
     }
     resetAllStores();
     accessStore.setLoginExpired(false);
+
+    // 已在登录页时不要再 replace, 避免路由抖动引发重复请求
+    if (router.currentRoute.value.path === LOGIN_PATH) {
+      return;
+    }
 
     // 回登录页带上当前路由地址
     await router.replace({

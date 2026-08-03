@@ -21,6 +21,9 @@ import { refreshTokenApi } from "./core";
 
 const { apiURL } = useAppConfig(import.meta.env, import.meta.env.PROD);
 
+/** 防止 401/未登录 处理触发 logout → 再未登录 → 无限循环 */
+let reAuthenticating = false;
+
 function createRequestClient(baseURL: string, options?: RequestClientOptions) {
   const client = new RequestClient({
     ...options,
@@ -31,17 +34,26 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
    * 重新认证逻辑
    */
   async function doReAuthenticate() {
+    if (reAuthenticating) {
+      return;
+    }
+    reAuthenticating = true;
     console.warn("Access token or refresh token is invalid or expired. ");
     const accessStore = useAccessStore();
     const authStore = useAuthStore();
-    accessStore.setAccessToken(null);
-    if (
-      preferences.app.loginExpiredMode === "modal" &&
-      accessStore.isAccessChecked
-    ) {
-      accessStore.setLoginExpired(true);
-    } else {
-      await authStore.logout();
+    try {
+      if (
+        preferences.app.loginExpiredMode === "modal" &&
+        accessStore.isAccessChecked
+      ) {
+        accessStore.setAccessToken(null);
+        accessStore.setLoginExpired(true);
+      } else {
+        // 先 logout(仍带旧 token 调服务端撤销), 再清本地; 勿提前清 token 导致 logout 也 61
+        await authStore.logout();
+      }
+    } finally {
+      reAuthenticating = false;
     }
   }
 
@@ -100,6 +112,12 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
       const errorMessage =
         responseData?.error ?? responseData?.message ?? responseData?.msg ?? "";
 
+      // logout 自身失败(例如 token 已空)不能再触发登出, 否则死循环刷 /auth/logout
+      const reqUrl = String(error?.config?.url ?? "");
+      if (reqUrl.includes("/auth/logout")) {
+        return;
+      }
+
       // 未授权判定: GoFrame CodeNotAuthorized(61) 或 HTTP 401 或典型消息
       if (
         responseData?.code === 61 ||
@@ -108,8 +126,7 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
         errorMessage.includes("未登录") ||
         errorMessage.includes("已失效")
       ) {
-        // token 无效，执行重新认证逻辑
-        doReAuthenticate();
+        void doReAuthenticate();
         return; // 不显示错误消息，因为会跳转到登录页
       }
 
