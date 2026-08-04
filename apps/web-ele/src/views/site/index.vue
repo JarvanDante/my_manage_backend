@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { onMounted, reactive, ref } from "vue";
+import { nextTick, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import {
@@ -87,10 +87,10 @@ const formRef = ref();
 const merchants = ref<MerchantApi.MerchantItem[]>([]);
 const form = reactive<SiteApi.SaveParams>({
   id: undefined,
-  merchant_id: 0,
+  merchant_id: undefined as unknown as number,
   site_code: "",
   name: "",
-  env: "dev",
+  env: "",
   db_host: "127.0.0.1",
   db_port: 5432,
   db_name: "",
@@ -100,6 +100,7 @@ const form = reactive<SiteApi.SaveParams>({
 });
 const rules = {
   merchant_id: [
+    { required: true, message: "请选择商户", trigger: "change" },
     {
       validator: (_: any, v: number, cb: any) =>
         v > 0 ? cb() : cb(new Error("请选择商户")),
@@ -109,15 +110,28 @@ const rules = {
   site_code: [
     { required: true, message: "site_code 必填", trigger: "blur" },
     {
-      pattern: /^[a-z][a-z0-9]{1,31}$/,
-      message: "2~32位小写字母开头的字母数字",
+      pattern: /^[A-Z]{2,32}$/,
+      message: "2~32位大写英文字母(不含数字与特殊符号)",
       trigger: "blur",
     },
   ],
   name: [{ required: true, message: "站点名必填", trigger: "blur" }],
+  env: [{ required: true, message: "请选择环境", trigger: "change" }],
   db_host: [{ required: true, message: "必填", trigger: "blur" }],
   db_name: [{ required: true, message: "必填", trigger: "blur" }],
   db_user: [{ required: true, message: "必填", trigger: "blur" }],
+  db_pass: [
+    {
+      validator: (_: any, v: string, cb: any) => {
+        if (!isEdit.value && !v) {
+          cb(new Error("请填写 DB 密码"));
+          return;
+        }
+        cb();
+      },
+      trigger: "blur",
+    },
+  ],
 };
 
 async function loadMerchants() {
@@ -129,10 +143,10 @@ function openCreate() {
   isEdit.value = false;
   Object.assign(form, {
     id: undefined,
-    merchant_id: 0,
+    merchant_id: undefined,
     site_code: "",
     name: "",
-    env: "dev",
+    env: "",
     db_host: "127.0.0.1",
     db_port: 5432,
     db_name: "",
@@ -142,6 +156,7 @@ function openCreate() {
   });
   loadMerchants();
   dialogVisible.value = true;
+  nextTick(() => formRef.value?.clearValidate());
 }
 
 function openEdit(row: SiteApi.SiteItem) {
@@ -165,10 +180,6 @@ function openEdit(row: SiteApi.SiteItem) {
 
 async function handleSave() {
   await formRef.value?.validate();
-  if (!isEdit.value && !form.db_pass) {
-    ElMessage.warning("创建站点必须填写数据库密码");
-    return;
-  }
   saving.value = true;
   try {
     if (isEdit.value) {
@@ -262,7 +273,12 @@ onMounted(fetchList);
     >
       <ElForm ref="formRef" :model="form" :rules="rules" label-width="110px">
         <ElFormItem label="所属商户" prop="merchant_id">
-          <ElSelect v-model="form.merchant_id" placeholder="选择商户" style="width: 100%">
+          <ElSelect
+            v-model="form.merchant_id"
+            placeholder="请选择"
+            clearable
+            style="width: 100%"
+          >
             <ElOption v-for="m in merchants" :key="m.id" :label="m.name" :value="m.id" />
           </ElSelect>
         </ElFormItem>
@@ -270,14 +286,15 @@ onMounted(fetchList);
           <ElInput
             v-model="form.site_code"
             :disabled="isEdit"
-            placeholder="唯一站点码, 创建后不可改(如 my)"
+            placeholder="唯一站点码, 创建后不可改(如 MY / DEMO)"
+            @blur="form.site_code = String(form.site_code || '').trim().toUpperCase()"
           />
         </ElFormItem>
         <ElFormItem label="站点名" prop="name">
           <ElInput v-model="form.name" placeholder="如 漫隐" />
         </ElFormItem>
         <ElFormItem label="环境" prop="env">
-          <ElSelect v-model="form.env" style="width: 100%">
+          <ElSelect v-model="form.env" placeholder="请选择" clearable style="width: 100%">
             <ElOption label="dev" value="dev" />
             <ElOption label="test" value="test" />
             <ElOption label="prod" value="prod" />
@@ -295,12 +312,12 @@ onMounted(fetchList);
         <ElFormItem label="DB 账号" prop="db_user">
           <ElInput v-model="form.db_user" />
         </ElFormItem>
-        <ElFormItem label="DB 密码">
+        <ElFormItem label="DB 密码" prop="db_pass" :required="!isEdit">
           <ElInput
             v-model="form.db_pass"
             type="password"
             show-password
-            :placeholder="isEdit ? '留空表示不修改' : '必填, AES 加密存储'"
+            :placeholder="isEdit ? '留空表示不修改' : '请输入 DB 密码'"
           />
         </ElFormItem>
         <ElFormItem label="备注">

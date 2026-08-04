@@ -145,7 +145,7 @@ const historyTotal = ref(0);
 const viewDialog = ref(false);
 const viewContent = ref("");
 
-async function loadConfigTab() {
+async function loadConfigTab(syncEditor = false) {
   const [cur, his] = await Promise.all([
     getCurrentConfigApi(siteId),
     getConfigHistoryApi(siteId, 1, 20),
@@ -153,8 +153,8 @@ async function loadConfigTab() {
   current.value = cur;
   historyData.value = his.list || [];
   historyTotal.value = his.total || 0;
-  // 编辑器默认带入最近一次发布的原文(不含注入的 database 段)
-  if (!editContent.value && historyData.value.length > 0) {
+  // 首次进入或发布/回滚后, 用最新历史原文同步编辑器
+  if ((syncEditor || !editContent.value) && historyData.value.length > 0) {
     editContent.value = historyData.value[0]!.content;
   }
 }
@@ -165,7 +165,7 @@ async function handlePublish() {
     return;
   }
   await ElMessageBox.confirm(
-    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? database 段将自动注入登记的DB信息。`,
+    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? 将保留你的配置, 仅覆盖 database.default.link 为登记库连接。`,
     "发布确认",
     { type: "warning" }
   );
@@ -174,7 +174,7 @@ async function handlePublish() {
     const res = await publishConfigApi(siteId, editContent.value, publishRemark.value);
     ElMessage.success(`发布成功, 版本 v${res.version}`);
     publishRemark.value = "";
-    loadConfigTab();
+    await loadConfigTab(true);
   } finally {
     publishing.value = false;
   }
@@ -188,7 +188,7 @@ async function handleRollback(item: SiteConfigApi.HistoryItem) {
   );
   const res = await rollbackConfigApi(siteId, item.version);
   ElMessage.success(`回滚成功, 新版本 v${res.version}`);
-  loadConfigTab();
+  await loadConfigTab(true);
 }
 
 function handleViewHistory(item: SiteConfigApi.HistoryItem) {
@@ -234,7 +234,12 @@ onMounted(fetchDetail);
         <!-- 基本信息 + DB -->
         <ElTabPane label="基本信息" name="info">
           <ElDescriptions :column="2" border>
-            <ElDescriptionsItem label="所属商户">{{ detail.merchant_name }}</ElDescriptionsItem>
+            <ElDescriptionsItem label="所属商户">
+              {{ detail.merchant_name || "-" }}
+              <span v-if="detail.merchant_id" class="text-muted-foreground ml-1 text-xs">
+                (#{{ detail.merchant_id }})
+              </span>
+            </ElDescriptionsItem>
             <ElDescriptionsItem label="创建时间">{{ detail.created_at }}</ElDescriptionsItem>
             <ElDescriptionsItem label="DB 地址">
               {{ detail.db_host }}:{{ detail.db_port }}
@@ -259,8 +264,8 @@ onMounted(fetchDetail);
           <div class="mb-3 flex items-center gap-2">
             <ElInput
               v-model="newDomain"
-              placeholder="如 h5.example.com"
-              style="width: 260px"
+              placeholder="如 h5.example.com 或 localhost:5779"
+              style="width: 300px"
               @keyup.enter="handleBindDomain"
             />
             <span class="text-sm">HTTPS</span>
@@ -306,41 +311,6 @@ onMounted(fetchDetail);
           </ElTable>
         </ElTabPane>
 
-        <!-- 开站清单 FM4 -->
-        <ElTabPane label="开站清单" name="provision">
-          <div class="mb-3 flex items-center gap-3">
-            <ElButton type="primary" :loading="provisionLoading" @click="handleProvisionCheck">
-              重新校验
-            </ElButton>
-            <ElButton
-              type="success"
-              :disabled="!canOnline"
-              @click="handleSetStatus(1)"
-            >
-              上线站点
-            </ElButton>
-            <span v-if="detail.status === 1" class="text-sm text-green-600">已上线</span>
-          </div>
-          <ElAlert
-            v-if="provision"
-            :type="provision.all_passed ? 'success' : 'warning'"
-            :title="provision.all_passed ? '五项校验全部通过, 可以上线' : '存在未通过项, 不能上线'"
-            :closable="false"
-            class="mb-3"
-          />
-          <ElTable v-if="provision" :data="provision.items" border>
-            <ElTableColumn prop="name" label="校验项" width="140" />
-            <ElTableColumn label="结果" width="90" align="center">
-              <template #default="{ row }">
-                <ElTag :type="row.ok ? 'success' : 'danger'">
-                  {{ row.ok ? "通过" : "未过" }}
-                </ElTag>
-              </template>
-            </ElTableColumn>
-            <ElTableColumn prop="detail" label="说明" min-width="300" />
-          </ElTable>
-        </ElTabPane>
-
         <!-- 配置发布 FM3 -->
         <ElTabPane label="配置发布" name="config">
           <ElAlert
@@ -355,7 +325,7 @@ onMounted(fetchDetail);
               <div class="mb-2 flex items-center gap-2">
                 <span class="font-medium">编辑配置(YAML)</span>
                 <span class="text-muted-foreground text-xs">
-                  database 段发布时自动注入, 无需填写
+                  原文顺序/注释保留; 仅自动覆盖 database.default.link
                 </span>
               </div>
               <ElInput
@@ -408,6 +378,41 @@ onMounted(fetchDetail);
               </ElTableColumn>
             </ElTable>
           </div>
+        </ElTabPane>
+
+        <!-- 开站清单 FM4 -->
+        <ElTabPane label="开站清单" name="provision">
+          <div class="mb-3 flex items-center gap-3">
+            <ElButton type="primary" :loading="provisionLoading" @click="handleProvisionCheck">
+              重新校验
+            </ElButton>
+            <ElButton
+              type="success"
+              :disabled="!canOnline"
+              @click="handleSetStatus(1)"
+            >
+              上线站点
+            </ElButton>
+            <span v-if="detail.status === 1" class="text-sm text-green-600">已上线</span>
+          </div>
+          <ElAlert
+            v-if="provision"
+            :type="provision.all_passed ? 'success' : 'warning'"
+            :title="provision.all_passed ? '五项校验全部通过, 可以上线' : '存在未通过项, 不能上线'"
+            :closable="false"
+            class="mb-3"
+          />
+          <ElTable v-if="provision" :data="provision.items" border>
+            <ElTableColumn prop="name" label="校验项" width="140" />
+            <ElTableColumn label="结果" width="90" align="center">
+              <template #default="{ row }">
+                <ElTag :type="row.ok ? 'success' : 'danger'">
+                  {{ row.ok ? "通过" : "未过" }}
+                </ElTag>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn prop="detail" label="说明" min-width="300" />
+          </ElTable>
         </ElTabPane>
       </ElTabs>
     </ElCard>
