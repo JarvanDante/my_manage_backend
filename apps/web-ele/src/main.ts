@@ -1,4 +1,4 @@
-import { initPreferences } from '@vben/preferences';
+import { initPreferences, updatePreferences } from '@vben/preferences';
 import { unmountGlobalLoading } from '@vben/utils';
 
 import { overridesPreferences } from './preferences';
@@ -17,6 +17,10 @@ async function initApplication() {
   await initPreferences({
     namespace,
     overrides: overridesPreferences,
+  });
+  // 标题以 .env 为准(偏好缓存用 defu 合并会保留旧 name, 导致侧栏仍显示旧品牌名)
+  updatePreferences({
+    app: { name: import.meta.env.VITE_APP_TITLE || '总后台' },
   });
 
   // 启动应用并挂载
