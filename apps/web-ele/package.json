@@ -43,6 +43,7 @@
     "@vueuse/core": "catalog:",
     "dayjs": "catalog:",
     "element-plus": "catalog:",
+    "hls.js": "^1.6.17",
     "pinia": "catalog:",
     "vue": "catalog:",
     "vue-i18n": "9.14.1",

@@ -17,6 +17,13 @@ export const overridesPreferences = defineOverridesPreferences({
     builtinType: "pink",
     colorPrimary: "hsl(347 77% 60%)",
   },
+  // 顶部区域压矮：面包屑栏 + 多页签
+  header: {
+    height: 40,
+  },
+  tabbar: {
+    height: 30,
+  },
   // 添加 logo 配置
   logo: {
     enable: true,

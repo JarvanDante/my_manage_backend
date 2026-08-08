@@ -22,6 +22,13 @@ export default defineConfig(async () => {
             target: "http://host.docker.internal:8003",
             ws: true,
           },
+          // 媒资中心 my_media（Docker 内前端需走 host.docker.internal，与 /manage 一致）
+          "/media-api": {
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/media-api/, ""),
+            target: "http://host.docker.internal:8004",
+            ws: true,
+          },
         },
       },
     },
