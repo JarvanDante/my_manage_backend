@@ -3,6 +3,7 @@ import { nextTick, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import {
+  ElAlert,
   ElButton,
   ElCard,
   ElDialog,
@@ -178,6 +179,14 @@ function openEdit(row: SiteApi.SiteItem) {
   dialogVisible.value = true;
 }
 
+const credDialogVisible = ref(false);
+const createdCred = reactive({
+  id: 0,
+  site_code: "",
+  app_key: "",
+  app_secret: "",
+});
+
 async function handleSave() {
   await formRef.value?.validate();
   saving.value = true;
@@ -185,14 +194,38 @@ async function handleSave() {
     if (isEdit.value) {
       await updateSiteApi(form);
       ElMessage.success("更新成功(密码留空未修改)");
+      dialogVisible.value = false;
+      fetchList();
     } else {
-      await createSiteApi(form);
-      ElMessage.success("创建成功");
+      const res = await createSiteApi(form);
+      Object.assign(createdCred, {
+        id: res.id,
+        site_code: String(form.site_code || "").toUpperCase(),
+        app_key: res.app_key,
+        app_secret: res.app_secret,
+      });
+      dialogVisible.value = false;
+      credDialogVisible.value = true;
+      fetchList();
     }
-    dialogVisible.value = false;
-    fetchList();
   } finally {
     saving.value = false;
+  }
+}
+
+async function copyText(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success(`${label} 已复制`);
+  } catch {
+    ElMessage.error("复制失败, 请手动选择复制");
+  }
+}
+
+function goCreatedDetail() {
+  credDialogVisible.value = false;
+  if (createdCred.id > 0) {
+    router.push({ path: "/site/detail", query: { id: createdCred.id } });
   }
 }
 
@@ -327,6 +360,49 @@ onMounted(fetchList);
       <template #footer>
         <ElButton @click="dialogVisible = false">取消</ElButton>
         <ElButton type="primary" :loading="saving" @click="handleSave">保存</ElButton>
+      </template>
+    </ElDialog>
+
+    <ElDialog
+      v-model="credDialogVisible"
+      title="站点已创建 · PaaS 凭证"
+      width="560px"
+      :close-on-click-modal="false"
+    >
+      <ElAlert
+        type="warning"
+        :closable="false"
+        show-icon
+        class="mb-4"
+        title="请妥善保管 APPSECRET。关闭后仍可在站点详情中「查看 APPSECRET」再次查看。"
+      />
+      <div class="space-y-3 text-sm">
+        <div>
+          <div class="text-muted-foreground mb-1">站点</div>
+          <div class="font-medium">{{ createdCred.site_code }} (#{{ createdCred.id }})</div>
+        </div>
+        <div>
+          <div class="mb-1 flex items-center justify-between">
+            <span class="text-muted-foreground">APPKEY</span>
+            <ElButton link type="primary" @click="copyText(createdCred.app_key, 'APPKEY')">
+              复制
+            </ElButton>
+          </div>
+          <ElInput :model-value="createdCred.app_key" readonly />
+        </div>
+        <div>
+          <div class="mb-1 flex items-center justify-between">
+            <span class="text-muted-foreground">APPSECRET</span>
+            <ElButton link type="primary" @click="copyText(createdCred.app_secret, 'APPSECRET')">
+              复制
+            </ElButton>
+          </div>
+          <ElInput :model-value="createdCred.app_secret" readonly type="textarea" :rows="2" />
+        </div>
+      </div>
+      <template #footer>
+        <ElButton @click="credDialogVisible = false">我已保存</ElButton>
+        <ElButton type="primary" @click="goCreatedDetail">去站点详情</ElButton>
       </template>
     </ElDialog>
   </div>
