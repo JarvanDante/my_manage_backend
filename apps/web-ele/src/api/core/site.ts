@@ -22,8 +22,20 @@ export namespace SiteApi {
     db_name: string;
     db_user: string;
     db_pass: string; // 永远 ******
+    app_key: string; // PaaS APPKEY; secret 不在列表/详情返回
     remark: string;
     created_at: string;
+  }
+
+  export interface CreateResult {
+    id: number;
+    app_key: string;
+    app_secret: string;
+  }
+
+  export interface AppCredentials {
+    app_key: string;
+    app_secret: string;
   }
 
   export interface SiteDetail extends SiteItem {
@@ -88,7 +100,15 @@ export async function getSiteDetailApi(id: number) {
 }
 
 export async function createSiteApi(params: SiteApi.SaveParams) {
-  return requestClient.post<{ id: number }>("/sites", params);
+  return requestClient.post<SiteApi.CreateResult>("/sites", params);
+}
+
+export async function revealSiteSecretApi(id: number) {
+  return requestClient.get<SiteApi.AppCredentials>(`/sites/${id}/app-secret`);
+}
+
+export async function resetSiteSecretApi(id: number) {
+  return requestClient.post<SiteApi.AppCredentials>(`/sites/${id}/reset-secret`);
 }
 
 export async function updateSiteApi(params: SiteApi.SaveParams) {

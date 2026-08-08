@@ -25,6 +25,8 @@ import {
   dbCheckApi,
   getSiteDetailApi,
   provisionCheckApi,
+  resetSiteSecretApi,
+  revealSiteSecretApi,
   setMainDomainApi,
   setSiteStatusApi,
   type SiteApi,
@@ -64,6 +66,50 @@ const statusTag: Record<number, { label: string; type: "info" | "success" | "dan
 async function fetchDetail() {
   if (!ensureSiteId()) return;
   detail.value = await getSiteDetailApi(siteId);
+}
+
+// ---------- PaaS 凭证 ----------
+const secretDialogVisible = ref(false);
+const secretLoading = ref(false);
+const shownSecret = ref({ app_key: "", app_secret: "" });
+
+async function copyText(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success(`${label} 已复制`);
+  } catch {
+    ElMessage.error("复制失败, 请手动选择复制");
+  }
+}
+
+async function openSecretDialog(res: { app_key: string; app_secret: string }) {
+  shownSecret.value = { app_key: res.app_key, app_secret: res.app_secret };
+  secretDialogVisible.value = true;
+}
+
+async function handleRevealSecret() {
+  secretLoading.value = true;
+  try {
+    const res = await revealSiteSecretApi(siteId);
+    await openSecretDialog(res);
+  } finally {
+    secretLoading.value = false;
+  }
+}
+
+async function handleResetSecret() {
+  const tip = detail.value?.app_key
+    ? "确认重置 APPSECRET？旧密钥立即失效，调用方需同步更新配置。"
+    : "该站尚无凭证，确认生成 APPKEY / APPSECRET？";
+  await ElMessageBox.confirm(tip, "PaaS 凭证", { type: "warning" });
+  secretLoading.value = true;
+  try {
+    const res = await resetSiteSecretApi(siteId);
+    await openSecretDialog(res);
+    await fetchDetail();
+  } finally {
+    secretLoading.value = false;
+  }
 }
 
 // ---------- db-check ----------
@@ -165,7 +211,7 @@ async function handlePublish() {
     return;
   }
   await ElMessageBox.confirm(
-    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? 将保留你的配置, 仅覆盖 database.default.link 为登记库连接。`,
+    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? 将保留你的配置, 自动覆盖 database.default.link, 并注入 paas.app_key / paas.app_secret。`,
     "发布确认",
     { type: "warning" }
   );
@@ -247,11 +293,29 @@ onMounted(fetchDetail);
             <ElDescriptionsItem label="DB 库/账号">
               {{ detail.db_name }} / {{ detail.db_user }}(密码 ******)
             </ElDescriptionsItem>
+            <ElDescriptionsItem label="APPKEY">
+              <span v-if="detail.app_key" class="font-mono text-sm">{{ detail.app_key }}</span>
+              <span v-else class="text-muted-foreground">未生成(历史站可点下方补发)</span>
+            </ElDescriptionsItem>
+            <ElDescriptionsItem label="APPSECRET">
+              ******
+              <span class="text-muted-foreground ml-2 text-xs">默认脱敏, 可点「查看」解密回显</span>
+            </ElDescriptionsItem>
             <ElDescriptionsItem label="备注" :span="2">{{ detail.remark || "-" }}</ElDescriptionsItem>
           </ElDescriptions>
-          <div class="mt-4 flex items-center gap-3">
+          <div class="mt-4 flex flex-wrap items-center gap-3">
             <ElButton type="primary" :loading="dbChecking" @click="handleDbCheck">
               连通性校验(db-check)
+            </ElButton>
+            <ElButton
+              v-if="detail.app_key"
+              :loading="secretLoading"
+              @click="handleRevealSecret"
+            >
+              查看 APPSECRET
+            </ElButton>
+            <ElButton :loading="secretLoading" @click="handleResetSecret">
+              {{ detail.app_key ? "重置 APPSECRET" : "生成 PaaS 凭证" }}
             </ElButton>
             <ElTag v-if="dbResult" :type="dbResult.ok ? 'success' : 'danger'">
               {{ dbResult.ok ? `连接正常 ${dbResult.latency_ms}ms` : dbResult.message }}
@@ -325,7 +389,7 @@ onMounted(fetchDetail);
               <div class="mb-2 flex items-center gap-2">
                 <span class="font-medium">编辑配置(YAML)</span>
                 <span class="text-muted-foreground text-xs">
-                  原文顺序/注释保留; 仅自动覆盖 database.default.link
+                  原文保留; 自动覆盖 database.default.link, 并注入 paas.app_key/app_secret
                 </span>
               </div>
               <ElInput
@@ -419,6 +483,44 @@ onMounted(fetchDetail);
 
     <ElDialog v-model="viewDialog" title="历史版本内容" width="640px">
       <pre class="bg-muted max-h-[480px] overflow-auto rounded p-3 text-xs leading-5">{{ viewContent }}</pre>
+    </ElDialog>
+
+    <ElDialog
+      v-model="secretDialogVisible"
+      title="PaaS 凭证"
+      width="560px"
+      :close-on-click-modal="false"
+    >
+      <ElAlert
+        type="info"
+        :closable="false"
+        show-icon
+        class="mb-4"
+        title="APPSECRET 已加密保存在控制面，可随时再次查看；重置后旧密钥失效。发布配置会同步写入 Nacos。"
+      />
+      <div class="space-y-3 text-sm">
+        <div>
+          <div class="mb-1 flex items-center justify-between">
+            <span class="text-muted-foreground">APPKEY</span>
+            <ElButton link type="primary" @click="copyText(shownSecret.app_key, 'APPKEY')">
+              复制
+            </ElButton>
+          </div>
+          <ElInput :model-value="shownSecret.app_key" readonly />
+        </div>
+        <div>
+          <div class="mb-1 flex items-center justify-between">
+            <span class="text-muted-foreground">APPSECRET</span>
+            <ElButton link type="primary" @click="copyText(shownSecret.app_secret, 'APPSECRET')">
+              复制
+            </ElButton>
+          </div>
+          <ElInput :model-value="shownSecret.app_secret" readonly type="textarea" :rows="2" />
+        </div>
+      </div>
+      <template #footer>
+        <ElButton type="primary" @click="secretDialogVisible = false">我已保存</ElButton>
+      </template>
     </ElDialog>
   </div>
 </template>
