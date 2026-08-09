@@ -29,6 +29,13 @@ export default defineConfig(async () => {
             target: "http://host.docker.internal:8004",
             ws: true,
           },
+          // 统一存储 my_storage（宿主机映射 8015，避免与 jh_game :8005 冲突）
+          "/storage-api": {
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/storage-api/, ""),
+            target: "http://host.docker.internal:8015",
+            ws: true,
+          },
         },
       },
     },

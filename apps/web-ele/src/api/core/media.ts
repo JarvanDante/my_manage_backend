@@ -51,7 +51,7 @@ const mediaClient = createMediaClient({ responseReturn: "data" });
 
 export namespace MediaApi {
   export interface AssetItem {
-    id: string; // 8 位短码
+    id: string; // 对外短码(新 16 位，历史可能 8 位)
     title: string;
     cover_url: string;
     status: number;

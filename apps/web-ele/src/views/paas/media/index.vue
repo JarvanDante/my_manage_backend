@@ -363,7 +363,7 @@ onMounted(() => {
       </div>
 
       <ElTable v-loading="loading" :data="tableData" stripe border>
-        <ElTableColumn prop="id" label="ID" width="110" />
+        <ElTableColumn prop="id" label="ID" width="160" show-overflow-tooltip />
         <ElTableColumn prop="title" label="标题" min-width="160" show-overflow-tooltip />
         <ElTableColumn label="封面" width="96" align="center">
           <template #default="{ row }">
