@@ -42,8 +42,7 @@ const products = [
 ] as const;
 
 const quickLinks = [
-  { title: "系统接入", desc: "发放 APPKEY / APPSECRET", path: "/tpp/access" },
-  { title: "接入文档", desc: "鉴权方式与接口说明", path: "/tpp/docs" },
+  { title: "接入中心", desc: "开通凭证 + 对接文档", path: "/tpp/center" },
 ] as const;
 
 function go(path: string) {
