@@ -23,6 +23,8 @@ import {
   ElMessageBox,
   ElOption,
   ElPagination,
+  ElRadioButton,
+  ElRadioGroup,
   ElSelect,
   ElTable,
   ElTableColumn,
@@ -148,8 +150,31 @@ const videoRef = ref<HTMLVideoElement | null>(null);
 const playerError = ref("");
 let hlsPlayer: Hls | null = null;
 
+// ---- 清晰度切换(多码率 master.m3u8 时可用) ----
+const qualityLevels = ref<{ index: number; label: string }[]>([]);
+const currentQuality = ref(-1); // -1 = 自动
+const activeQualityLabel = ref(""); // 自动模式下当前实际档位
+
+function resetQuality() {
+  qualityLevels.value = [];
+  currentQuality.value = -1;
+  activeQualityLabel.value = "";
+}
+
+function onQualityChange(v: number | string | boolean | undefined) {
+  const idx = Number(v);
+  currentQuality.value = idx;
+  if (!hlsPlayer) return;
+  // -1 交回 ABR 自动; 其他立即切到指定档
+  hlsPlayer.currentLevel = idx;
+  if (idx >= 0) {
+    activeQualityLabel.value = "";
+  }
+}
+
 function destroyPlayer() {
   playerError.value = "";
+  resetQuality();
   if (hlsPlayer) {
     hlsPlayer.destroy();
     hlsPlayer = null;
@@ -179,6 +204,30 @@ async function setupPlayer(url: string) {
       playerError.value = `播放失败：${data.type}/${data.details}`;
       hlsPlayer?.destroy();
       hlsPlayer = null;
+      resetQuality();
+    });
+    hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+      const levels = hlsPlayer?.levels ?? [];
+      // 单档不显示切换菜单
+      qualityLevels.value =
+        levels.length > 1
+          ? levels.map((lv, i) => ({
+              index: i,
+              label:
+                (lv as any).name ||
+                (lv.height ? `${lv.height}p` : `${Math.round(lv.bitrate / 1000)}k`),
+            }))
+          : [];
+      currentQuality.value = -1;
+    });
+    hlsPlayer.on(Hls.Events.LEVEL_SWITCHED, (_evt, data) => {
+      // 自动模式下显示 ABR 当前实际档位
+      if (currentQuality.value === -1) {
+        const lv = hlsPlayer?.levels?.[data.level];
+        activeQualityLabel.value = lv
+          ? (lv as any).name || (lv.height ? `${lv.height}p` : "")
+          : "";
+      }
     });
     hlsPlayer.loadSource(url);
     hlsPlayer.attachMedia(el);
@@ -470,6 +519,28 @@ onMounted(() => {
             >
               暂无播放地址（上传并转码完成后可预览）
             </div>
+          </div>
+          <div
+            v-if="qualityLevels.length > 1"
+            class="mb-3 flex items-center gap-2"
+          >
+            <span class="text-xs text-gray-500">清晰度：</span>
+            <ElRadioGroup
+              :model-value="currentQuality"
+              size="small"
+              @update:model-value="onQualityChange"
+            >
+              <ElRadioButton :value="-1">
+                自动{{ activeQualityLabel ? `(${activeQualityLabel})` : "" }}
+              </ElRadioButton>
+              <ElRadioButton
+                v-for="q in qualityLevels"
+                :key="q.index"
+                :value="q.index"
+              >
+                {{ q.label }}
+              </ElRadioButton>
+            </ElRadioGroup>
           </div>
           <p v-if="playerError" class="mb-3 text-xs text-red-500">
             {{ playerError }}
