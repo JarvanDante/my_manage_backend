@@ -11,6 +11,7 @@ import {
   ElInput,
   ElInputNumber,
   ElMessage,
+  ElMessageBox,
   ElOption,
   ElSelect,
   ElSwitch,
@@ -23,8 +24,10 @@ import {
 
 import {
   getPlayPolicyListApi,
+  getPlayRevokeListApi,
   getPlayStatsApi,
   type PlayApi,
+  revokePlayApi,
   savePlayPolicyApi,
 } from "#/api/core/play";
 import { getSiteListApi } from "#/api/core/site";
@@ -38,10 +41,17 @@ const siteCodes = ref<string[]>([]);
 async function loadSites() {
   try {
     const res = await getSiteListApi({ page: 1, size: 100 } as any);
-    siteCodes.value = (res.list || []).map((s: any) => s.site_code || s.code).filter(Boolean);
+    const codes = (res.list || []).map((s: any) => s.site_code || s.code).filter(Boolean);
+    // admin = 总后台预览播放的站点标识(playsign.Wrap 固定用 "admin"), 策略与失效闸都可能需要
+    siteCodes.value = ["admin", ...codes.filter((c: string) => c !== "admin")];
   } catch {
-    siteCodes.value = [];
+    siteCodes.value = ["admin"];
   }
+}
+
+// 站点下拉展示名: admin 是总后台预览来源, 非正式子站, 标注清楚避免误解
+function siteLabel(code: string) {
+  return code === "admin" ? "admin(总后台预览)" : code;
 }
 
 // ---------- 防盗链策略 ----------
@@ -139,10 +149,65 @@ async function loadStats() {
   }
 }
 
+// ---------- 链接一键失效 ----------
+const revokes = ref<PlayApi.RevokeItem[]>([]);
+const rLoading = ref(false);
+const revoking = ref(false);
+const revokeForm = reactive({ site_code: "", asset_code: "" });
+
+async function loadRevokes() {
+  rLoading.value = true;
+  try {
+    const res = await getPlayRevokeListApi();
+    revokes.value = res.list || [];
+  } finally {
+    rLoading.value = false;
+  }
+}
+
+function fmtTs(sec: number) {
+  if (!sec) return "-";
+  return new Date(sec * 1000).toLocaleString();
+}
+
+async function doRevoke() {
+  if (!revokeForm.site_code) {
+    ElMessage.warning("请选择站点");
+    return;
+  }
+  const siteLabel =
+    revokeForm.site_code === "*" ? "全部站点" : `站点 ${revokeForm.site_code}`;
+  const scope = revokeForm.asset_code
+    ? `${siteLabel} 的资产 ${revokeForm.asset_code}`
+    : `${siteLabel} 全部资产`;
+  try {
+    await ElMessageBox.confirm(
+      `将使【${scope}】已签发的播放链接立即失效(用户重新进入页面会拿到新链接)。确认?`,
+      "一键失效",
+      { type: "warning", confirmButtonText: "确认失效", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  revoking.value = true;
+  try {
+    await revokePlayApi({
+      site_code: revokeForm.site_code,
+      asset_code: revokeForm.asset_code || undefined,
+    });
+    ElMessage.success("已失效(网关约 15 秒内同步生效)");
+    revokeForm.asset_code = "";
+    loadRevokes();
+  } finally {
+    revoking.value = false;
+  }
+}
+
 onMounted(() => {
   loadPolicies();
   loadSites();
   loadStats();
+  loadRevokes();
 });
 </script>
 
@@ -160,7 +225,12 @@ onMounted(() => {
             <ElButton type="primary" @click="openCreate">新增策略</ElButton>
           </div>
           <ElTable v-loading="pLoading" :data="policies" border stripe>
-            <ElTableColumn prop="site_code" label="站点" width="120" />
+            <ElTableColumn label="站点" width="120">
+              <template #default="{ row }">
+                <ElTag v-if="row.site_code === '*'" type="danger" size="small">全部站点</ElTag>
+                <span v-else>{{ row.site_code }}</span>
+              </template>
+            </ElTableColumn>
             <ElTableColumn prop="referer_whitelist" label="Referer 白名单" min-width="200" show-overflow-tooltip>
               <template #default="{ row }">
                 <span v-if="row.referer_whitelist">{{ row.referer_whitelist }}</span>
@@ -203,7 +273,20 @@ onMounted(() => {
               end-placeholder="结束"
               style="width: 260px"
             />
-            <ElInput v-model="statSite" placeholder="站点(可空)" style="width: 140px" clearable />
+            <ElSelect
+              v-model="statSite"
+              placeholder="全部站点"
+              style="width: 160px"
+              clearable
+              filterable
+            >
+              <ElOption
+                v-for="c in siteCodes"
+                :key="c"
+                :label="siteLabel(c)"
+                :value="c"
+              />
+            </ElSelect>
             <ElButton type="primary" @click="loadStats">查询</ElButton>
             <span class="text-muted-foreground text-xs">plays=m3u8 拉取次数(≈播放次数); 分片请求可估算流量热度</span>
           </div>
@@ -215,6 +298,51 @@ onMounted(() => {
             <ElTableColumn prop="seg_reqs" label="分片请求" width="110" align="right" sortable />
           </ElTable>
         </ElTabPane>
+
+        <!-- 链接一键失效 -->
+        <ElTabPane label="链接失效" name="revoke">
+          <div class="mb-3 flex items-center gap-2">
+            <ElSelect
+              v-model="revokeForm.site_code"
+              filterable
+              allow-create
+              placeholder="选择站点"
+              style="width: 160px"
+            >
+              <ElOption key="*" label="全部站点(*)" value="*" />
+              <ElOption v-for="c in siteCodes" :key="c" :label="siteLabel(c)" :value="c" />
+            </ElSelect>
+            <ElInput
+              v-model="revokeForm.asset_code"
+              placeholder="资产 code(空=整站全部)"
+              style="width: 220px"
+              clearable
+            />
+            <ElButton type="danger" :loading="revoking" @click="doRevoke">一键失效</ElButton>
+            <ElButton @click="loadRevokes">刷新</ElButton>
+            <span class="text-muted-foreground text-xs">
+              失效基线之前签发的链接一律拒绝; 之后新签发的链接不受影响。网关约 15 秒同步。
+            </span>
+          </div>
+          <ElTable v-loading="rLoading" :data="revokes" border stripe>
+            <ElTableColumn label="站点" width="120">
+              <template #default="{ row }">
+                <ElTag v-if="row.site_code === '*'" type="danger" size="small">全部站点</ElTag>
+                <span v-else>{{ row.site_code }}</span>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn label="资产" min-width="160">
+              <template #default="{ row }">
+                <span v-if="row.asset_code && row.asset_code !== '*'">{{ row.asset_code }}</span>
+                <ElTag v-else type="warning" size="small">整站</ElTag>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn label="失效基线(此前链接全失效)" min-width="200">
+              <template #default="{ row }">{{ fmtTs(row.not_before) }}</template>
+            </ElTableColumn>
+            <ElTableColumn prop="updated_at" label="操作时间" width="170" />
+          </ElTable>
+        </ElTabPane>
       </ElTabs>
     </ElCard>
 
@@ -223,7 +351,7 @@ onMounted(() => {
       <ElForm :model="form" label-width="110px">
         <ElFormItem label="站点">
           <ElSelect v-if="!isEdit" v-model="form.site_code" filterable allow-create placeholder="选择或输入 site_code" style="width: 100%">
-            <ElOption v-for="c in siteCodes" :key="c" :label="c" :value="c" />
+            <ElOption v-for="c in siteCodes" :key="c" :label="siteLabel(c)" :value="c" />
           </ElSelect>
           <ElInput v-else v-model="form.site_code" disabled />
         </ElFormItem>

@@ -1435,7 +1435,7 @@ const playAdminApis: DocApi[] = [
     base: MEDIA,
     tip: "原理：记录失效基线 not_before，签发时间 iat 早于基线的 token 一律 403；之后新签发的不受影响。网关约 15 秒同步。适用：链接被盗播扩散、套餐变更强制重签。",
     params: [
-      { name: "site_code", in: "body", required: true, desc: "站点 code", example: "MY" },
+      { name: "site_code", in: "body", required: true, desc: "站点 code；传 * 表示全部站点(跨站打击)", example: "MY" },
       { name: "asset_code", in: "body", desc: "资产短码；空 = 整站全部", example: "FgySA8kT9SV9db7w" },
     ],
     bodyExample: `{
