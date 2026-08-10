@@ -35,7 +35,7 @@ const products = [
   },
   {
     title: "广告中台",
-    desc: "广告位、素材与投放配置，子站按策略引用展示。",
+    desc: "广告位 / 素材 / 投放已对接；子站 Open 拉取展示。",
     icon: "lucide:megaphone",
     path: "/paas/ad",
   },

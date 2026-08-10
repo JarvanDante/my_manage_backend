@@ -36,6 +36,13 @@ export default defineConfig(async () => {
             target: "http://host.docker.internal:8015",
             ws: true,
           },
+          // 广告中台 my_ad（宿主机映射 8016）
+          "/ad-api": {
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/ad-api/, ""),
+            target: "http://host.docker.internal:8016",
+            ws: true,
+          },
         },
       },
     },

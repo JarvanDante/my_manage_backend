@@ -16,6 +16,7 @@ defineOptions({ name: "TppAccessDocs" });
 
 const MEDIA = "http://127.0.0.1:8004";
 const STORAGE = "http://127.0.0.1:8015";
+const AD = "http://127.0.0.1:8016";
 
 const docTab = ref("overview");
 const mediaOpenKeys = ref(["m-o-0", "m-o-1", "m-o-2", "m-o-3"]);
@@ -38,6 +39,22 @@ const storageAdminKeys = ref([
   "s-a-5",
   "s-a-6",
   "s-a-7",
+]);
+const adOpenKeys = ref(["a-o-0", "a-o-1"]);
+const adAdminKeys = ref([
+  "a-a-0",
+  "a-a-1",
+  "a-a-2",
+  "a-a-3",
+  "a-a-4",
+  "a-a-5",
+  "a-a-6",
+  "a-a-7",
+  "a-a-8",
+  "a-a-9",
+  "a-a-10",
+  "a-a-11",
+  "a-a-12",
 ]);
 
 interface DocApi {
@@ -736,6 +753,530 @@ curl -sS -X POST "$BASE/open/objects/$ID/confirm" \\
 curl -sS -X POST "$BASE/open/objects/$ID/download-url" \\
   -H "X-App-Key: $KEY" -H "X-App-Secret: $SEC"`;
 
+const adOpenApis: DocApi[] = [
+  {
+    key: "a-o-0",
+    title: "GET /open/ads · 按广告位拉取",
+    method: "GET",
+    path: "/open/ads",
+    summary: "按 slot_code 拉取本站当前可展示广告",
+    auth: "open",
+    base: AD,
+    tip: "site_code 由凭证自动带入。匹配：广告位启用 + 投放启用 + 素材就绪 +（全站或本站）+ 排期内；按 priority/weight 降序。",
+    params: [
+      {
+        name: "slot_code",
+        in: "query",
+        required: true,
+        desc: "广告位 code，如 home_banner",
+        example: "home_banner",
+      },
+      {
+        name: "limit",
+        in: "query",
+        type: "int",
+        desc: "最多返回条数，默认10，最大50",
+        example: "10",
+      },
+    ],
+    responseExample: `{
+  "list": [
+    {
+      "campaign_id": "Ab12Cd34Ef56Gh78",
+      "creative_id": "Xy98Zw76Vu54Ts32",
+      "title": "活动封面",
+      "media_url": "https://cdn.example.com/a.jpg",
+      "link_url": "https://example.com/act",
+      "slot_code": "home_banner",
+      "priority": 100,
+      "weight": 100
+    }
+  ]
+}`,
+    curl: `curl -sS '${AD}/open/ads?slot_code=home_banner&limit=10' \\
+  -H 'X-App-Key: YOUR_APP_KEY' \\
+  -H 'X-App-Secret: YOUR_APP_SECRET'`,
+  },
+  {
+    key: "a-o-1",
+    title: "POST /open/events · 曝光/点击上报",
+    method: "POST",
+    path: "/open/events",
+    summary: "上报展示或点击（可选，写 ad_event）",
+    auth: "open",
+    base: AD,
+    tip: "site_code / app_key 由凭证写入事件表，用于后续粗统计。",
+    params: [
+      {
+        name: "event_type",
+        in: "body",
+        required: true,
+        desc: "impression | click",
+        example: "impression",
+      },
+      { name: "campaign_id", in: "body", desc: "投放短码" },
+      { name: "creative_id", in: "body", desc: "素材短码" },
+      { name: "slot_code", in: "body", desc: "广告位 code" },
+    ],
+    bodyExample: `{
+  "event_type": "impression",
+  "campaign_id": "Ab12Cd34Ef56Gh78",
+  "creative_id": "Xy98Zw76Vu54Ts32",
+  "slot_code": "home_banner"
+}`,
+    responseExample: `{ "ok": true }`,
+    curl: `curl -sS -X POST '${AD}/open/events' \\
+  -H 'X-App-Key: YOUR_APP_KEY' \\
+  -H 'X-App-Secret: YOUR_APP_SECRET' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"event_type":"click","campaign_id":"Ab12Cd34Ef56Gh78","creative_id":"Xy98Zw76Vu54Ts32","slot_code":"home_banner"}'`,
+  },
+];
+
+const adAdminApis: DocApi[] = [
+  {
+    key: "a-a-0",
+    title: "PUT /admin/clients · 同步调用方",
+    method: "PUT",
+    path: "/admin/clients",
+    summary: "登记/更新 Open 凭证（开站 manage adsync 写入）",
+    auth: "admin",
+    base: AD,
+    tip: "一般无需手调；建站/重置 APPSECRET 时总后台会 best-effort 同步。",
+    params: [
+      { name: "app_key", in: "body", required: true, desc: "调用方 key" },
+      { name: "app_secret", in: "body", required: true, desc: "明文 secret，落库哈希" },
+      { name: "site_code", in: "body", desc: "站点码", example: "MY" },
+      { name: "status", in: "body", type: "int", desc: "1启用 0停用", example: "1" },
+      { name: "remark", in: "body", desc: "备注" },
+    ],
+    bodyExample: `{
+  "app_key": "ak_xxx",
+  "app_secret": "sk_xxx",
+  "site_code": "MY",
+  "status": 1,
+  "remark": "sync from my_manage_service"
+}`,
+    responseExample: `{ "app_key": "ak_xxx", "site_code": "MY", "status": 1 }`,
+    curl: `curl -sS -X PUT '${AD}/admin/clients' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"app_key":"ak_xxx","app_secret":"sk_xxx","site_code":"MY","status":1}'`,
+  },
+  {
+    key: "a-a-1",
+    title: "GET /admin/slots · 广告位列表",
+    method: "GET",
+    path: "/admin/slots",
+    summary: "广告位模板列表",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "page", in: "query", type: "int", desc: "页码", example: "1" },
+      { name: "size", in: "query", type: "int", desc: "每页", example: "20" },
+      { name: "keyword", in: "query", desc: "code / 名称" },
+      {
+        name: "status",
+        in: "query",
+        type: "int",
+        desc: "-1全部 1启用 0停用",
+        example: "-1",
+      },
+    ],
+    responseExample: `{
+  "list": [
+    {
+      "id": 1,
+      "code": "home_banner",
+      "name": "首页Banner",
+      "slot_type": "banner",
+      "width": 750,
+      "height": 320,
+      "status": 1,
+      "remark": "",
+      "created_at": "2026-08-11 00:00:00",
+      "updated_at": "2026-08-11 00:00:00"
+    }
+  ],
+  "total": 1
+}`,
+    curl: `curl -sS '${AD}/admin/slots?page=1&size=20&status=-1' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-2",
+    title: "POST /admin/slots · 创建广告位",
+    method: "POST",
+    path: "/admin/slots",
+    summary: "创建广告位（code 全局唯一）",
+    auth: "admin",
+    base: AD,
+    params: [
+      {
+        name: "code",
+        in: "body",
+        required: true,
+        desc: "位编码，创建后不可改",
+        example: "home_banner",
+      },
+      { name: "name", in: "body", required: true, desc: "显示名" },
+      {
+        name: "slot_type",
+        in: "body",
+        desc: "banner / splash / feed / player",
+        example: "banner",
+      },
+      { name: "width", in: "body", type: "int", desc: "建议宽度" },
+      { name: "height", in: "body", type: "int", desc: "建议高度" },
+      { name: "status", in: "body", type: "int", desc: "默认1", example: "1" },
+      { name: "remark", in: "body", desc: "备注" },
+    ],
+    bodyExample: `{
+  "code": "home_banner",
+  "name": "首页Banner",
+  "slot_type": "banner",
+  "width": 750,
+  "height": 320,
+  "status": 1
+}`,
+    responseExample: `{ "id": 1, "code": "home_banner" }`,
+    curl: `curl -sS -X POST '${AD}/admin/slots' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"code":"home_banner","name":"首页Banner","slot_type":"banner","width":750,"height":320}'`,
+  },
+  {
+    key: "a-a-3",
+    title: "GET/PUT/DELETE /admin/slots/{id}",
+    method: "GET",
+    path: "/admin/slots/{id}",
+    summary: "详情 / 更新 / 停用（DELETE 软停用 status=0）",
+    auth: "admin",
+    base: AD,
+    tip: "更新用 PUT；停用用 DELETE（软禁用，不物理删）。",
+    params: [
+      { name: "id", in: "path", required: true, type: "int64", desc: "广告位 ID" },
+      { name: "name", in: "body", desc: "PUT 时必填" },
+      { name: "slot_type", in: "body", desc: "PUT" },
+      { name: "width / height / status / remark", in: "body", desc: "PUT 可选字段" },
+    ],
+    bodyExample: `{
+  "name": "首页Banner",
+  "slot_type": "banner",
+  "width": 750,
+  "height": 320,
+  "status": 1,
+  "remark": ""
+}`,
+    responseExample: `{ "id": 1, "code": "home_banner", "name": "首页Banner", "status": 1 }`,
+    curl: `curl -sS '${AD}/admin/slots/1' -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'
+
+curl -sS -X PUT '${AD}/admin/slots/1' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN' -H 'Content-Type: application/json' \\
+  -d '{"name":"首页Banner","slot_type":"banner","width":750,"height":320,"status":1}'
+
+curl -sS -X DELETE '${AD}/admin/slots/1' -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-4",
+    title: "GET /admin/creatives · 素材列表",
+    method: "GET",
+    path: "/admin/creatives",
+    summary: "素材列表",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "page", in: "query", type: "int", desc: "页码", example: "1" },
+      { name: "size", in: "query", type: "int", desc: "每页", example: "20" },
+      { name: "keyword", in: "query", desc: "标题 / 短码" },
+      { name: "status", in: "query", type: "int", desc: "-1全部", example: "-1" },
+    ],
+    responseExample: `{
+  "list": [
+    {
+      "id": "Xy98Zw76Vu54Ts32",
+      "title": "活动封面",
+      "media_url": "https://cdn.example.com/a.jpg",
+      "link_url": "https://example.com/act",
+      "storage_object_id": "",
+      "status": 1,
+      "remark": "",
+      "created_at": "..."
+    }
+  ],
+  "total": 1
+}`,
+    curl: `curl -sS '${AD}/admin/creatives?page=1&size=20&status=1' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-5",
+    title: "POST /admin/creatives · 创建素材",
+    method: "POST",
+    path: "/admin/creatives",
+    summary: "创建素材，返回 16 位短码 id",
+    auth: "admin",
+    base: AD,
+    tip: "文件请先上传统一存储，再把可访问 URL 填入 media_url；可选填 storage_object_id。",
+    params: [
+      { name: "title", in: "body", required: true, desc: "标题" },
+      {
+        name: "media_url",
+        in: "body",
+        required: true,
+        desc: "素材 URL（图片/视频）",
+      },
+      { name: "link_url", in: "body", desc: "点击落地页" },
+      {
+        name: "storage_object_id",
+        in: "body",
+        desc: "可选，统一存储对象短码",
+      },
+      { name: "status", in: "body", type: "int", desc: "默认1", example: "1" },
+      { name: "remark", in: "body", desc: "备注" },
+    ],
+    bodyExample: `{
+  "title": "活动封面",
+  "media_url": "https://cdn.example.com/a.jpg",
+  "link_url": "https://example.com/act",
+  "storage_object_id": "",
+  "status": 1
+}`,
+    responseExample: `{ "id": "Xy98Zw76Vu54Ts32" }`,
+    curl: `curl -sS -X POST '${AD}/admin/creatives' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"title":"活动封面","media_url":"https://cdn.example.com/a.jpg","link_url":"https://example.com/act"}'`,
+  },
+  {
+    key: "a-a-6",
+    title: "GET/PUT/DELETE /admin/creatives/{id}",
+    method: "GET",
+    path: "/admin/creatives/{id}",
+    summary: "素材详情 / 更新 / 下架",
+    auth: "admin",
+    base: AD,
+    tip: "DELETE 为软下架（status=0），已绑定投放将不再被 Open 拉出。",
+    params: [
+      { name: "id", in: "path", required: true, desc: "16位短码" },
+      { name: "title / media_url", in: "body", desc: "PUT 必填" },
+      { name: "link_url / storage_object_id / status / remark", in: "body", desc: "PUT 可选" },
+    ],
+    bodyExample: `{
+  "title": "活动封面",
+  "media_url": "https://cdn.example.com/a.jpg",
+  "link_url": "https://example.com/act",
+  "status": 1
+}`,
+    responseExample: `{ "id": "Xy98Zw76Vu54Ts32", "title": "活动封面", "status": 1 }`,
+    curl: `curl -sS '${AD}/admin/creatives/Xy98Zw76Vu54Ts32' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'
+
+curl -sS -X DELETE '${AD}/admin/creatives/Xy98Zw76Vu54Ts32' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-7",
+    title: "GET /admin/campaigns · 投放列表",
+    method: "GET",
+    path: "/admin/campaigns",
+    summary: "投放单列表（可按站/广告位筛）",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "page", in: "query", type: "int", desc: "页码", example: "1" },
+      { name: "size", in: "query", type: "int", desc: "每页", example: "20" },
+      { name: "keyword", in: "query", desc: "名称 / 短码" },
+      { name: "site_code", in: "query", desc: "站点筛选", example: "MY" },
+      { name: "slot_id", in: "query", type: "int64", desc: "广告位 ID" },
+      { name: "status", in: "query", type: "int", desc: "-1全部", example: "-1" },
+    ],
+    responseExample: `{
+  "list": [
+    {
+      "id": "Ab12Cd34Ef56Gh78",
+      "name": "首页活动",
+      "slot_id": 1,
+      "creative_id": "Xy98Zw76Vu54Ts32",
+      "site_code": "MY",
+      "priority": 100,
+      "weight": 100,
+      "status": 1,
+      "start_at": "",
+      "end_at": "",
+      "remark": ""
+    }
+  ],
+  "total": 1
+}`,
+    curl: `curl -sS '${AD}/admin/campaigns?page=1&size=20&site_code=MY&status=1' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-8",
+    title: "POST /admin/campaigns · 创建投放",
+    method: "POST",
+    path: "/admin/campaigns",
+    summary: "绑定广告位 + 素材，生成投放单",
+    auth: "admin",
+    base: AD,
+    tip: "site_code 空=全站；非空仅该站可见。start_at/end_at 可空表示不限排期。",
+    params: [
+      { name: "name", in: "body", required: true, desc: "投放名称" },
+      { name: "slot_id", in: "body", required: true, type: "int64", desc: "广告位 ID" },
+      {
+        name: "creative_id",
+        in: "body",
+        required: true,
+        desc: "素材 16 位短码",
+      },
+      { name: "site_code", in: "body", desc: "空=全站", example: "MY" },
+      { name: "priority", in: "body", type: "int", desc: "越大越优先，默认100" },
+      { name: "weight", in: "body", type: "int", desc: "同优先级权重，默认100" },
+      { name: "status", in: "body", type: "int", desc: "1投放中 0暂停" },
+      { name: "start_at", in: "body", desc: "可选，如 2026-08-11 00:00:00" },
+      { name: "end_at", in: "body", desc: "可选" },
+      { name: "remark", in: "body", desc: "备注" },
+    ],
+    bodyExample: `{
+  "name": "首页活动",
+  "slot_id": 1,
+  "creative_id": "Xy98Zw76Vu54Ts32",
+  "site_code": "MY",
+  "priority": 100,
+  "weight": 100,
+  "status": 1
+}`,
+    responseExample: `{ "id": "Ab12Cd34Ef56Gh78" }`,
+    curl: `curl -sS -X POST '${AD}/admin/campaigns' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"name":"首页活动","slot_id":1,"creative_id":"Xy98Zw76Vu54Ts32","site_code":"MY","status":1}'`,
+  },
+  {
+    key: "a-a-9",
+    title: "GET/PUT /admin/campaigns/{id}",
+    method: "GET",
+    path: "/admin/campaigns/{id}",
+    summary: "投放详情 / 更新",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "id", in: "path", required: true, desc: "投放短码" },
+      { name: "name / slot_id / creative_id", in: "body", desc: "PUT 必填" },
+      {
+        name: "site_code / priority / weight / status / start_at / end_at",
+        in: "body",
+        desc: "PUT 可选",
+      },
+    ],
+    responseExample: `{
+  "id": "Ab12Cd34Ef56Gh78",
+  "name": "首页活动",
+  "slot_id": 1,
+  "creative_id": "Xy98Zw76Vu54Ts32",
+  "site_code": "MY",
+  "status": 1
+}`,
+    curl: `curl -sS '${AD}/admin/campaigns/Ab12Cd34Ef56Gh78' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-10",
+    title: "POST /admin/campaigns/{id}/status · 启停",
+    method: "POST",
+    path: "/admin/campaigns/{id}/status",
+    summary: "快速开启/暂停投放",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "id", in: "path", required: true, desc: "投放短码" },
+      {
+        name: "status",
+        in: "body",
+        required: true,
+        type: "int",
+        desc: "1开启 0暂停",
+        example: "0",
+      },
+    ],
+    bodyExample: `{ "status": 0 }`,
+    responseExample: `{ "id": "Ab12Cd34Ef56Gh78", "status": 0 }`,
+    curl: `curl -sS -X POST '${AD}/admin/campaigns/Ab12Cd34Ef56Gh78/status' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"status":0}'`,
+  },
+  {
+    key: "a-a-11",
+    title: "GET /admin/clients · 调用方列表",
+    method: "GET",
+    path: "/admin/clients",
+    summary: "已同步的 Open 调用方",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "page", in: "query", type: "int", example: "1" },
+      { name: "size", in: "query", type: "int", example: "20" },
+      { name: "keyword", in: "query", desc: "app_key / site_code" },
+    ],
+    responseExample: `{
+  "list": [
+    { "id": 1, "app_key": "ak_xxx", "site_code": "MY", "status": 1, "remark": "..." }
+  ],
+  "total": 1
+}`,
+    curl: `curl -sS '${AD}/admin/clients?page=1&size=20' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+  {
+    key: "a-a-12",
+    title: "POST /admin/clients/{app_key}/disable",
+    method: "POST",
+    path: "/admin/clients/{app_key}/disable",
+    summary: "停用调用方（Open 鉴权失败）",
+    auth: "admin",
+    base: AD,
+    params: [
+      { name: "app_key", in: "path", required: true, desc: "调用方 key" },
+    ],
+    responseExample: `{ "app_key": "ak_xxx", "status": 0 }`,
+    curl: `curl -sS -X POST '${AD}/admin/clients/ak_xxx/disable' \\
+  -H 'X-Admin-Token: YOUR_ADMIN_TOKEN'`,
+  },
+];
+
+const adPipeline = `ADMIN_TOKEN=YOUR_ADMIN_TOKEN
+BASE=${AD}
+KEY=YOUR_APP_KEY
+SEC=YOUR_APP_SECRET
+
+# 1) 广告位
+curl -sS -X POST "$BASE/admin/slots" \\
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"code":"home_banner","name":"首页Banner","slot_type":"banner","width":750,"height":320}'
+
+# 2) 素材（media_url 建议先走统一存储拿到可访问地址）
+CREATIVE=$(curl -sS -X POST "$BASE/admin/creatives" \\
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"title":"活动封面","media_url":"https://cdn.example.com/a.jpg","link_url":"https://example.com/act"}')
+echo "$CREATIVE"
+CID=$(echo "$CREATIVE" | jq -r '.data.id')
+
+# 3) 投放（site_code 空=全站）
+curl -sS -X POST "$BASE/admin/campaigns" \\
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \\
+  -d "{\\"name\\":\\"首页活动\\",\\"slot_id\\":1,\\"creative_id\\":\\"$CID\\",\\"site_code\\":\\"MY\\",\\"status\\":1}"
+
+# 4) 子站拉取
+curl -sS "$BASE/open/ads?slot_code=home_banner&limit=10" \\
+  -H "X-App-Key: $KEY" -H "X-App-Secret: $SEC"
+
+# 5) 可选上报
+curl -sS -X POST "$BASE/open/events" \\
+  -H "X-App-Key: $KEY" -H "X-App-Secret: $SEC" -H "Content-Type: application/json" \\
+  -d '{"event_type":"impression","slot_code":"home_banner","creative_id":"'"$CID"'"}'`;
+
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
@@ -774,7 +1315,8 @@ async function copyText(text: string) {
             <div class="doc-hero__chips">
               <span class="chip chip--ok">媒资已落地</span>
               <span class="chip chip--ok">存储已落地</span>
-              <span class="chip">统一播放 / 支付 / 广告规划中</span>
+              <span class="chip chip--ok">广告中台已落地</span>
+              <span class="chip">统一播放 / 支付规划中</span>
             </div>
           </section>
 
@@ -833,6 +1375,13 @@ Content-Type: application/json</pre>
                   <em>Docker 映射 8015→8005</em>
                 </div>
                 <code>{{ STORAGE }}</code>
+              </div>
+              <div class="env-item" @click="copyText(AD)">
+                <div class="env-item__top">
+                  <span>广告 my_ad</span>
+                  <em>Docker 映射 8016→8006</em>
+                </div>
+                <code>{{ AD }}</code>
               </div>
               <div class="env-item" @click="copyText('http://127.0.0.1:19000')">
                 <div class="env-item__top">
@@ -1130,14 +1679,122 @@ Content-Type: application/json</pre>
 
       <ElTabPane label="广告中台" name="ad">
         <div class="doc-stack">
-          <section class="doc-hero doc-hero--muted">
+          <section class="doc-hero doc-hero--storage">
             <div>
               <div class="doc-hero__meta">
-                <ElTag type="info" size="small">规划中</ElTag>
+                <ElTag type="success" size="small">已落地</ElTag>
+                <span>my_ad · {{ AD }}</span>
               </div>
               <h3 class="doc-hero__title">广告中台</h3>
-              <p class="doc-hero__desc">素材文件走统一存储；广告业务接口待补充。</p>
+              <p class="doc-hero__desc">
+                广告位 / 素材 / 投放。子站
+                <code>GET /open/ads?slot_code=</code> 拉取；素材文件走统一存储，本服务存
+                <code>media_url</code>。探活 <code>GET /healthz</code> · Swagger
+                <code>{{ AD }}/swagger/</code>
+              </p>
             </div>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">使用流程与逻辑</div>
+            <ol class="flow-steps">
+              <li>
+                <strong>Admin</strong>：创建广告位（code）→ 创建素材（media_url）→ 创建投放（绑定位
+                + 素材，可选 site_code / 排期）
+              </li>
+              <li>
+                <strong>子站 Open</strong>：凭证鉴权后按
+                <code>slot_code</code> 拉取有效广告 → 前端展示 media_url / link_url
+              </li>
+              <li>
+                <strong>上报（可选）</strong>：曝光/点击
+                <code>POST /open/events</code>
+              </li>
+              <li>
+                <strong>凭证</strong>：开站/重置 secret 经 manage
+                <code>adsync</code> 写入本服务 <code>paas_client</code>
+              </li>
+            </ol>
+            <div class="flow-rail" aria-hidden="true">
+              <span>广告位</span>
+              <i />
+              <span>素材</span>
+              <i />
+              <span>投放</span>
+              <i />
+              <span>Open 拉取</span>
+              <i />
+              <span>展示/上报</span>
+            </div>
+            <ul class="bullet-list flow-notes">
+              <li>
+                拉取条件：广告位启用 + 投放启用 + 素材就绪 +（全站或匹配本站）+ 在排期内
+              </li>
+              <li>排序：priority 降序，再 weight 降序</li>
+              <li>
+                素材文件建议先走统一存储拿 URL；本服务不存文件，只存
+                <code>media_url</code> / 可选 <code>storage_object_id</code>
+              </li>
+              <li>总后台可视化管理：平台服务 → 广告中台（代理 <code>/ad-api</code>）</li>
+            </ul>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">Open · 子站接口</div>
+            <ElCollapse v-model="adOpenKeys">
+              <ElCollapseItem
+                v-for="api in adOpenApis"
+                :key="api.key"
+                :title="api.title"
+                :name="api.key"
+              >
+                <ApiEndpoint
+                  :method="api.method"
+                  :path="api.path"
+                  :summary="api.summary"
+                  :base="api.base"
+                  :auth="api.auth"
+                  :tip="api.tip"
+                  :params="api.params"
+                  :body-example="api.bodyExample"
+                  :response-example="api.responseExample"
+                  :curl="api.curl"
+                />
+              </ElCollapseItem>
+            </ElCollapse>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">Admin · 总后台接口</div>
+            <ElCollapse v-model="adAdminKeys">
+              <ElCollapseItem
+                v-for="api in adAdminApis"
+                :key="api.key"
+                :title="api.title"
+                :name="api.key"
+              >
+                <ApiEndpoint
+                  :method="api.method"
+                  :path="api.path"
+                  :summary="api.summary"
+                  :base="api.base"
+                  :auth="api.auth"
+                  :tip="api.tip"
+                  :params="api.params"
+                  :body-example="api.bodyExample"
+                  :response-example="api.responseExample"
+                  :curl="api.curl"
+                />
+              </ElCollapseItem>
+            </ElCollapse>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">完整链路示例 · Admin 配置 + 子站拉取</div>
+            <pre class="code-block">{{ adPipeline }}</pre>
+            <button type="button" class="copy-btn" @click="copyText(adPipeline)">
+              复制脚本
+            </button>
           </section>
         </div>
       </ElTabPane>

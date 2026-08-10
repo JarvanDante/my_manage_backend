@@ -1,18 +1,250 @@
 <script lang="ts" setup>
-import ModulePlaceholder from "#/views/tpp/components/ModulePlaceholder.vue";
+import { onMounted, reactive, ref } from "vue";
+
+import {
+  ElButton,
+  ElCard,
+  ElDatePicker,
+  ElDialog,
+  ElForm,
+  ElFormItem,
+  ElInput,
+  ElInputNumber,
+  ElMessage,
+  ElOption,
+  ElSelect,
+  ElSwitch,
+  ElTable,
+  ElTableColumn,
+  ElTabPane,
+  ElTabs,
+  ElTag,
+} from "element-plus";
+
+import {
+  getPlayPolicyListApi,
+  getPlayStatsApi,
+  type PlayApi,
+  savePlayPolicyApi,
+} from "#/api/core/play";
+import { getSiteListApi } from "#/api/core/site";
 
 defineOptions({ name: "PaasPlay" });
+
+const activeTab = ref("policy");
+
+// ---------- 站点(用于新建策略下拉) ----------
+const siteCodes = ref<string[]>([]);
+async function loadSites() {
+  try {
+    const res = await getSiteListApi({ page: 1, size: 100 } as any);
+    siteCodes.value = (res.list || []).map((s: any) => s.site_code || s.code).filter(Boolean);
+  } catch {
+    siteCodes.value = [];
+  }
+}
+
+// ---------- 防盗链策略 ----------
+const policies = ref<PlayApi.PolicyItem[]>([]);
+const pLoading = ref(false);
+async function loadPolicies() {
+  pLoading.value = true;
+  try {
+    const res = await getPlayPolicyListApi();
+    policies.value = res.list || [];
+  } finally {
+    pLoading.value = false;
+  }
+}
+
+const dialogVisible = ref(false);
+const isEdit = ref(false);
+const saving = ref(false);
+const form = reactive({
+  site_code: "",
+  referer_whitelist: "",
+  ua_blacklist: "",
+  token_ttl_sec: 14400,
+  status: true,
+});
+
+function openCreate() {
+  isEdit.value = false;
+  Object.assign(form, {
+    site_code: "",
+    referer_whitelist: "",
+    ua_blacklist: "curl,wget,python",
+    token_ttl_sec: 14400,
+    status: true,
+  });
+  dialogVisible.value = true;
+}
+
+function openEdit(row: PlayApi.PolicyItem) {
+  isEdit.value = true;
+  Object.assign(form, {
+    site_code: row.site_code,
+    referer_whitelist: row.referer_whitelist,
+    ua_blacklist: row.ua_blacklist,
+    token_ttl_sec: row.token_ttl_sec,
+    status: row.status === 1,
+  });
+  dialogVisible.value = true;
+}
+
+async function handleSave() {
+  if (!form.site_code) {
+    ElMessage.warning("请选择站点");
+    return;
+  }
+  saving.value = true;
+  try {
+    await savePlayPolicyApi({
+      site_code: form.site_code,
+      referer_whitelist: form.referer_whitelist,
+      ua_blacklist: form.ua_blacklist,
+      token_ttl_sec: form.token_ttl_sec,
+      status: form.status ? 1 : 0,
+    });
+    ElMessage.success("已保存(网关约 1 分钟内生效)");
+    dialogVisible.value = false;
+    loadPolicies();
+  } finally {
+    saving.value = false;
+  }
+}
+
+// ---------- 播放统计 ----------
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+function daysAgo(n: number) {
+  return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+}
+const statRange = ref<[string, string]>([daysAgo(6), today()]);
+const statSite = ref("");
+const statList = ref<PlayApi.StatItem[]>([]);
+const sLoading = ref(false);
+async function loadStats() {
+  sLoading.value = true;
+  try {
+    const res = await getPlayStatsApi({
+      start: statRange.value?.[0] || daysAgo(6),
+      end: statRange.value?.[1] || today(),
+      site_code: statSite.value || undefined,
+    });
+    statList.value = res.list || [];
+  } finally {
+    sLoading.value = false;
+  }
+}
+
+onMounted(() => {
+  loadPolicies();
+  loadSites();
+  loadStats();
+});
 </script>
 
 <template>
-  <ModulePlaceholder
-    title="统一播放"
-    tag="PaaS"
-    summary="HLS/鉴权/防盗链播放网关。各站只负责「谁有权看」，播放票根由平台签发。"
-    :bullets="[
-      'm3u8 / key 代理与短时 token',
-      'CDN 与防盗链策略按站配置',
-      '与媒资中心产出的转码结果对接',
-    ]"
-  />
+  <div class="p-5">
+    <ElCard shadow="never">
+      <ElTabs v-model="activeTab">
+        <!-- 防盗链策略 -->
+        <ElTabPane label="防盗链策略" name="policy">
+          <div class="mb-3 flex items-center">
+            <span class="text-muted-foreground text-xs">
+              按站点约束播放来源; 未配置策略的站点仅有 token 验签(M1 基线)。保存后网关约 1 分钟同步生效。
+            </span>
+            <div class="flex-1"></div>
+            <ElButton type="primary" @click="openCreate">新增策略</ElButton>
+          </div>
+          <ElTable v-loading="pLoading" :data="policies" border stripe>
+            <ElTableColumn prop="site_code" label="站点" width="120" />
+            <ElTableColumn prop="referer_whitelist" label="Referer 白名单" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="row.referer_whitelist">{{ row.referer_whitelist }}</span>
+                <span v-else class="text-muted-foreground text-xs">不限制</span>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn prop="ua_blacklist" label="UA 黑名单" min-width="160" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="row.ua_blacklist">{{ row.ua_blacklist }}</span>
+                <span v-else class="text-muted-foreground text-xs">不拦截</span>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn label="token 有效期" width="110" align="center">
+              <template #default="{ row }">{{ Math.round(row.token_ttl_sec / 60) }} 分钟</template>
+            </ElTableColumn>
+            <ElTableColumn label="状态" width="80" align="center">
+              <template #default="{ row }">
+                <ElTag :type="row.status === 1 ? 'success' : 'info'" size="small">
+                  {{ row.status === 1 ? "启用" : "停用" }}
+                </ElTag>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn prop="updated_at" label="更新时间" width="160" />
+            <ElTableColumn label="操作" width="90" fixed="right">
+              <template #default="{ row }">
+                <ElButton link type="primary" @click="openEdit(row)">编辑</ElButton>
+              </template>
+            </ElTableColumn>
+          </ElTable>
+        </ElTabPane>
+
+        <!-- 播放统计 -->
+        <ElTabPane label="播放统计" name="stats">
+          <div class="mb-3 flex items-center gap-2">
+            <ElDatePicker
+              v-model="statRange"
+              type="daterange"
+              value-format="YYYY-MM-DD"
+              start-placeholder="开始"
+              end-placeholder="结束"
+              style="width: 260px"
+            />
+            <ElInput v-model="statSite" placeholder="站点(可空)" style="width: 140px" clearable />
+            <ElButton type="primary" @click="loadStats">查询</ElButton>
+            <span class="text-muted-foreground text-xs">plays=m3u8 拉取次数(≈播放次数); 分片请求可估算流量热度</span>
+          </div>
+          <ElTable v-loading="sLoading" :data="statList" border stripe>
+            <ElTableColumn prop="day" label="日期" width="110" />
+            <ElTableColumn prop="site_code" label="站点" width="110" />
+            <ElTableColumn prop="asset_code" label="资产" min-width="160" />
+            <ElTableColumn prop="plays" label="播放次数" width="110" align="right" sortable />
+            <ElTableColumn prop="seg_reqs" label="分片请求" width="110" align="right" sortable />
+          </ElTable>
+        </ElTabPane>
+      </ElTabs>
+    </ElCard>
+
+    <!-- 策略编辑弹窗 -->
+    <ElDialog v-model="dialogVisible" :title="isEdit ? `编辑策略 — ${form.site_code}` : '新增策略'" width="520px">
+      <ElForm :model="form" label-width="110px">
+        <ElFormItem label="站点">
+          <ElSelect v-if="!isEdit" v-model="form.site_code" filterable allow-create placeholder="选择或输入 site_code" style="width: 100%">
+            <ElOption v-for="c in siteCodes" :key="c" :label="c" :value="c" />
+          </ElSelect>
+          <ElInput v-else v-model="form.site_code" disabled />
+        </ElFormItem>
+        <ElFormItem label="Referer 白名单">
+          <ElInput v-model="form.referer_whitelist" type="textarea" :rows="2" placeholder="逗号分隔的域名子串, 如 mysite.com,localhost; 空=不限制" />
+        </ElFormItem>
+        <ElFormItem label="UA 黑名单">
+          <ElInput v-model="form.ua_blacklist" placeholder="逗号分隔子串, 如 curl,wget,python; 空=不拦截" />
+        </ElFormItem>
+        <ElFormItem label="token 有效期">
+          <ElInputNumber v-model="form.token_ttl_sec" :min="60" :max="86400" :step="600" />
+          <span class="text-muted-foreground ml-2 text-xs">秒(默认 14400 = 4 小时)</span>
+        </ElFormItem>
+        <ElFormItem label="状态">
+          <ElSwitch v-model="form.status" active-text="启用" inactive-text="停用" />
+        </ElFormItem>
+      </ElForm>
+      <template #footer>
+        <ElButton @click="dialogVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="saving" @click="handleSave">保存</ElButton>
+      </template>
+    </ElDialog>
+  </div>
 </template>
