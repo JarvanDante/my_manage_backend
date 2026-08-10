@@ -49,6 +49,9 @@ function createMediaClient(options?: RequestClientOptions) {
 
 const mediaClient = createMediaClient({ responseReturn: "data" });
 
+/** 供其他 PaaS 页面(播放服务等)复用的 my_media 客户端 */
+export const mediaRequest = mediaClient;
+
 export namespace MediaApi {
   export interface AssetItem {
     id: string; // 对外短码(新 16 位，历史可能 8 位)
