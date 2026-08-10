@@ -22,7 +22,7 @@ const products = [
     path: "/paas/storage",
   },
   {
-    title: "播放服务",
+    title: "统一播放",
     desc: "HLS / 鉴权 / 防盗链播放网关，各站共用播放能力。",
     icon: "lucide:play-circle",
     path: "/paas/play",
@@ -34,7 +34,7 @@ const products = [
     path: "/paas/pay",
   },
   {
-    title: "广告平台",
+    title: "广告中台",
     desc: "广告位、素材与投放配置，子站按策略引用展示。",
     icon: "lucide:megaphone",
     path: "/paas/ad",

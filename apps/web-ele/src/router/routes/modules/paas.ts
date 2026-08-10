@@ -27,7 +27,7 @@ const routes: RouteRecordRaw[] = [
         name: "PaasPlay",
         path: "play",
         component: () => import("#/views/paas/play/index.vue"),
-        meta: { icon: "lucide:play-circle", title: "播放服务" },
+        meta: { icon: "lucide:play-circle", title: "统一播放" },
       },
       {
         name: "PaasPay",
@@ -39,7 +39,7 @@ const routes: RouteRecordRaw[] = [
         name: "PaasAd",
         path: "ad",
         component: () => import("#/views/paas/ad/index.vue"),
-        meta: { icon: "lucide:megaphone", title: "广告平台" },
+        meta: { icon: "lucide:megaphone", title: "广告中台" },
       },
     ],
   },

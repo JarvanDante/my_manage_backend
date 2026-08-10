@@ -6,7 +6,7 @@ defineOptions({ name: "PaasPlay" });
 
 <template>
   <ModulePlaceholder
-    title="播放服务"
+    title="统一播放"
     tag="PaaS"
     summary="HLS/鉴权/防盗链播放网关。各站只负责「谁有权看」，播放票根由平台签发。"
     :bullets="[
