@@ -168,10 +168,7 @@ async function setupPlayer(url: string) {
   const el = videoRef.value;
   if (!el || !url) return;
 
-  if (el.canPlayType("application/vnd.apple.mpegurl")) {
-    el.src = url;
-    return;
-  }
+  // hls.js 优先: Chrome 新版内置 HLS 会让 canPlayType 返回非空, 但嵌入播放不稳定(卡 0:00)
   if (Hls.isSupported()) {
     hlsPlayer = new Hls({
       enableWorker: true,
@@ -185,6 +182,11 @@ async function setupPlayer(url: string) {
     });
     hlsPlayer.loadSource(url);
     hlsPlayer.attachMedia(el);
+    return;
+  }
+  // 原生兜底(Safari 等)
+  if (el.canPlayType("application/vnd.apple.mpegurl")) {
+    el.src = url;
     return;
   }
   playerError.value = "当前浏览器不支持 HLS 播放";
