@@ -774,7 +774,7 @@ async function copyText(text: string) {
             <div class="doc-hero__chips">
               <span class="chip chip--ok">媒资已落地</span>
               <span class="chip chip--ok">存储已落地</span>
-              <span class="chip">播放 / 支付 / 广告规划中</span>
+              <span class="chip">统一播放 / 支付 / 广告规划中</span>
             </div>
           </section>
 
@@ -1098,14 +1098,14 @@ Content-Type: application/json</pre>
         </div>
       </ElTabPane>
 
-      <ElTabPane label="播放服务" name="play">
+      <ElTabPane label="统一播放" name="play">
         <div class="doc-stack">
           <section class="doc-hero doc-hero--muted">
             <div>
               <div class="doc-hero__meta">
                 <ElTag type="info" size="small">规划中</ElTag>
               </div>
-              <h3 class="doc-hero__title">播放服务</h3>
+              <h3 class="doc-hero__title">统一播放</h3>
               <p class="doc-hero__desc">
                 现阶段直接使用媒资返回的 <code>play_url</code>。网关接口待立项后按同样格式补充。
               </p>
@@ -1128,14 +1128,14 @@ Content-Type: application/json</pre>
         </div>
       </ElTabPane>
 
-      <ElTabPane label="广告平台" name="ad">
+      <ElTabPane label="广告中台" name="ad">
         <div class="doc-stack">
           <section class="doc-hero doc-hero--muted">
             <div>
               <div class="doc-hero__meta">
                 <ElTag type="info" size="small">规划中</ElTag>
               </div>
-              <h3 class="doc-hero__title">广告平台</h3>
+              <h3 class="doc-hero__title">广告中台</h3>
               <p class="doc-hero__desc">素材文件走统一存储；广告业务接口待补充。</p>
             </div>
           </section>

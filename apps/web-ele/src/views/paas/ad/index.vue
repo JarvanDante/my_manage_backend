@@ -6,7 +6,7 @@ defineOptions({ name: "PaasAd" });
 
 <template>
   <ModulePlaceholder
-    title="广告平台"
+    title="广告中台"
     tag="PaaS"
     summary="广告位、素材与投放配置的平台能力；各站在子后台决定开哪些位、权重与展示策略。"
     :bullets="[
