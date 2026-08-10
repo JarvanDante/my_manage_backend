@@ -17,6 +17,7 @@ defineOptions({ name: "TppAccessDocs" });
 const MEDIA = "http://127.0.0.1:8004";
 const STORAGE = "http://127.0.0.1:8015";
 const AD = "http://127.0.0.1:8016";
+const PLAY = "http://127.0.0.1:8006";
 
 const docTab = ref("overview");
 const mediaOpenKeys = ref(["m-o-0", "m-o-1", "m-o-2", "m-o-3"]);
@@ -41,6 +42,8 @@ const storageAdminKeys = ref([
   "s-a-7",
 ]);
 const adOpenKeys = ref(["a-o-0", "a-o-1"]);
+const playOpenKeys = ref(["p-o-0", "p-o-1", "p-o-2", "p-o-3"]);
+const playAdminKeys = ref(["p-a-0", "p-a-1", "p-a-2", "p-a-3", "p-a-4"]);
 const adAdminKeys = ref([
   "a-a-0",
   "a-a-1",
@@ -1285,6 +1288,173 @@ async function copyText(text: string) {
     ElMessage.error("复制失败");
   }
 }
+
+// ---- 统一播放(my_play 网关 + my_media 签发/策略) ----
+
+const playOpenApis: DocApi[] = [
+  {
+    key: "p-o-0",
+    title: "POST /open/assets/{id}/play-token · 签发播放地址",
+    method: "POST",
+    path: "/open/assets/{id}/play-token",
+    summary: "对已选用媒资签发网关播放地址（可试看 / 可绑IP）",
+    auth: "open",
+    base: MEDIA,
+    tip: "推荐入口：所有播放都从这里现签现用。返回的 play_url 指向播放网关（多码率自动指向 master.m3u8），有效期由站点策略 token_ttl_sec 决定（默认 4 小时）。",
+    params: [
+      { name: "id", in: "path", required: true, desc: "资产短码（需本站已 pick）", example: "FgySA8kT9SV9db7w" },
+      { name: "preview_sec", in: "body", type: "int", desc: "试看秒数；0 或不传 = 完整播放", example: "30" },
+      { name: "client_ip", in: "body", desc: "绑定观众 IP；传了则该链接仅此 IP 可播", example: "203.0.113.8" },
+    ],
+    bodyExample: `{
+  "preview_sec": 30,
+  "client_ip": "203.0.113.8"
+}`,
+    responseExample: `{
+  "play_url": "http://127.0.0.1:8006/hls/FgySA8kT9SV9db7w/master.m3u8?e=1786398266&s=MY&t=1786383866&d=30&i=203.0.113.8&sig=9bf042...",
+  "expires_at": 1786398266
+}`,
+    curl: `curl -sS -X POST '${MEDIA}/open/assets/FgySA8kT9SV9db7w/play-token' \\
+  -H 'X-App-Key: YOUR_APP_KEY' \\
+  -H 'X-App-Secret: YOUR_APP_SECRET' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"preview_sec":0}'`,
+  },
+  {
+    key: "p-o-1",
+    title: "GET /hls/{code}/{file} · 网关播放入口",
+    method: "GET",
+    path: "/hls/{code}/{file}",
+    summary: "播放器直接请求（token 在 URL 上），业务侧无需手工调用",
+    auth: "none",
+    base: PLAY,
+    tip: "把 play-token 返回的 play_url 直接喂给 hls.js / 原生播放器即可。网关逐级校验：token 验签 → IP 绑定 → 失效闸 → Referer 白名单 / UA 黑名单，任一不过返回 403。m3u8 动态重写并续签子清单与分片，ts 默认 302 到 MinIO 预签名地址。",
+    params: [
+      { name: "code", in: "path", required: true, desc: "资产短码", example: "FgySA8kT9SV9db7w" },
+      { name: "file", in: "path", required: true, desc: "master.m3u8 / 720p/index.m3u8 / index0.ts（多码率含一级子目录）", example: "master.m3u8" },
+      { name: "e", in: "query", required: true, type: "int", desc: "过期时间戳（Unix 秒）" },
+      { name: "s", in: "query", required: true, desc: "站点 code（statistics/策略归属）", example: "MY" },
+      { name: "t", in: "query", required: true, type: "int", desc: "签发时间戳 iat（链接一键失效用）" },
+      { name: "d", in: "query", type: "int", desc: "试看秒数；>0 时清单按时长截断" },
+      { name: "i", in: "query", desc: "绑定 IP；与请求来源不符则 403" },
+      { name: "sig", in: "query", required: true, desc: "HMAC-SHA256(code|site|exp|d|ip|iat)" },
+    ],
+    responseExample: `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=3128000,RESOLUTION=1280x720,NAME="720p"
+720p/index.m3u8?e=1786398266&s=MY&t=1786383866&sig=9bf042...
+#EXT-X-STREAM-INF:BANDWIDTH=1628000,RESOLUTION=854x480,NAME="480p"
+480p/index.m3u8?e=1786398266&s=MY&t=1786383866&sig=9bf042...`,
+  },
+  {
+    key: "p-o-2",
+    title: "GET /open/picks · 已选用列表（含长效 play_url）",
+    method: "GET",
+    path: "/open/picks",
+    summary: "本站已选用媒资；play_url 为网关签名地址（默认 TTL）",
+    auth: "open",
+    base: MEDIA,
+    tip: "列表返回的 play_url 也是网关签名地址，适合直接渲染；需要试看/绑IP 等定制场景再调 play-token 单独签发。",
+    params: [
+      { name: "page", in: "query", type: "int", desc: "页码", example: "1" },
+      { name: "size", in: "query", type: "int", desc: "每页条数", example: "20" },
+    ],
+    curl: `curl -sS '${MEDIA}/open/picks?page=1&size=20' \\
+  -H 'X-App-Key: YOUR_APP_KEY' \\
+  -H 'X-App-Secret: YOUR_APP_SECRET'`,
+  },
+  {
+    key: "p-o-3",
+    title: "GET /healthz · 网关探活",
+    method: "GET",
+    path: "/healthz",
+    summary: "播放网关健康检查",
+    auth: "none",
+    base: PLAY,
+    responseExample: `{ "ok": true, "service": "my_play" }`,
+    curl: `curl -sS '${PLAY}/healthz'`,
+  },
+];
+
+const playAdminApis: DocApi[] = [
+  {
+    key: "p-a-0",
+    title: "GET /admin/play/policies · 防盗链策略列表",
+    method: "GET",
+    path: "/admin/play/policies",
+    summary: "各站点防盗链策略（Referer 白名单 / UA 黑名单 / token 有效期）",
+    auth: "admin",
+    base: MEDIA,
+    curl: `curl -sS '${MEDIA}/admin/play/policies' -H 'X-Admin-Token: ADMIN_TOKEN'`,
+  },
+  {
+    key: "p-a-1",
+    title: "PUT /admin/play/policies/{site_code} · 保存站点策略",
+    method: "PUT",
+    path: "/admin/play/policies/{site_code}",
+    summary: "按站点保存防盗链策略；网关约 1 分钟内同步生效",
+    auth: "admin",
+    base: MEDIA,
+    params: [
+      { name: "site_code", in: "path", required: true, desc: "站点 code", example: "MY" },
+      { name: "referer_whitelist", in: "body", desc: "逗号分隔域名子串；空 = 不限制", example: "mysite.com,localhost" },
+      { name: "ua_blacklist", in: "body", desc: "逗号分隔 UA 子串，命中即拒", example: "curl,wget,python" },
+      { name: "token_ttl_sec", in: "body", type: "int", required: true, desc: "token 有效期（秒），≥60", example: "14400" },
+      { name: "status", in: "body", type: "int", desc: "1=启用 0=停用（停用即不做额外限制）", example: "1" },
+    ],
+    bodyExample: `{
+  "referer_whitelist": "mysite.com,localhost",
+  "ua_blacklist": "curl,wget,python",
+  "token_ttl_sec": 14400,
+  "status": 1
+}`,
+  },
+  {
+    key: "p-a-2",
+    title: "GET /admin/play/stats · 播放统计",
+    method: "GET",
+    path: "/admin/play/stats",
+    summary: "按日 × 站点 × 资产的播放次数与分片请求数",
+    auth: "admin",
+    base: MEDIA,
+    tip: "plays = 顶层清单拉取次数（≈播放次数，多码率子清单不重复计）；seg_reqs = 分片请求数，可估流量热度。网关每 30 秒批量上报一次。",
+    params: [
+      { name: "start", in: "query", required: true, desc: "开始日期 YYYY-MM-DD", example: "2026-08-04" },
+      { name: "end", in: "query", required: true, desc: "结束日期 YYYY-MM-DD", example: "2026-08-10" },
+      { name: "site_code", in: "query", desc: "按站点过滤，可空" },
+    ],
+    curl: `curl -sS '${MEDIA}/admin/play/stats?start=2026-08-04&end=2026-08-10' -H 'X-Admin-Token: ADMIN_TOKEN'`,
+  },
+  {
+    key: "p-a-3",
+    title: "POST /admin/play/revoke · 链接一键失效",
+    method: "POST",
+    path: "/admin/play/revoke",
+    summary: "使站点（或单个资产）已签发的播放链接立即失效",
+    auth: "admin",
+    base: MEDIA,
+    tip: "原理：记录失效基线 not_before，签发时间 iat 早于基线的 token 一律 403；之后新签发的不受影响。网关约 15 秒同步。适用：链接被盗播扩散、套餐变更强制重签。",
+    params: [
+      { name: "site_code", in: "body", required: true, desc: "站点 code", example: "MY" },
+      { name: "asset_code", in: "body", desc: "资产短码；空 = 整站全部", example: "FgySA8kT9SV9db7w" },
+    ],
+    bodyExample: `{
+  "site_code": "MY",
+  "asset_code": ""
+}`,
+    responseExample: `{ "not_before": 1786384000 }`,
+  },
+  {
+    key: "p-a-4",
+    title: "GET /admin/play/revokes · 失效闸列表",
+    method: "GET",
+    path: "/admin/play/revokes",
+    summary: "当前生效的失效基线（站点级 + 资产级）",
+    auth: "admin",
+    base: MEDIA,
+    curl: `curl -sS '${MEDIA}/admin/play/revokes' -H 'X-Admin-Token: ADMIN_TOKEN'`,
+  },
+];
 </script>
 
 <template>
@@ -1316,7 +1486,8 @@ async function copyText(text: string) {
               <span class="chip chip--ok">媒资已落地</span>
               <span class="chip chip--ok">存储已落地</span>
               <span class="chip chip--ok">广告中台已落地</span>
-              <span class="chip">统一播放 / 支付规划中</span>
+              <span class="chip chip--ok">统一播放已落地</span>
+              <span class="chip">支付规划中</span>
             </div>
           </section>
 
@@ -1649,16 +1820,122 @@ Content-Type: application/json</pre>
 
       <ElTabPane label="统一播放" name="play">
         <div class="doc-stack">
-          <section class="doc-hero doc-hero--muted">
+          <section class="doc-hero doc-hero--media">
             <div>
               <div class="doc-hero__meta">
-                <ElTag type="info" size="small">规划中</ElTag>
+                <ElTag type="success" size="small">已落地</ElTag>
+                <span>my_play · {{ PLAY }}（签发/策略在 my_media · {{ MEDIA }}）</span>
               </div>
-              <h3 class="doc-hero__title">统一播放</h3>
+              <h3 class="doc-hero__title">统一播放（HLS 网关）</h3>
               <p class="doc-hero__desc">
-                现阶段直接使用媒资返回的 <code>play_url</code>。网关接口待立项后按同样格式补充。
+                播放地址统一由网关签名下发：token 验签 → 防盗链 → 多码率 → 试看 →
+                一键失效 → 播放统计。探活 <code>GET /healthz</code>。
               </p>
             </div>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">使用流程与逻辑</div>
+            <ol class="flow-steps">
+              <li>
+                <strong>子站侧（Open）</strong>：对已 pick 的媒资调
+                <code>play-token</code> 现签播放地址（可带试看秒数 / 绑定观众
+                IP），或直接用 <code>/open/picks</code> 返回的默认地址
+              </li>
+              <li>
+                <strong>播放器</strong>：拿到的 URL 指向网关
+                <code>master.m3u8</code>（多码率自动按带宽切 720p/480p），直接喂给
+                hls.js / 原生播放器，无需其他处理
+              </li>
+              <li>
+                <strong>网关逐级校验</strong>：HMAC 验签（含过期）→ IP 绑定 →
+                失效闸（iat &lt; not_before 即拒）→ Referer 白名单 / UA
+                黑名单，任一不过 403
+              </li>
+              <li>
+                <strong>回源</strong>：m3u8 动态重写续签；ts 默认
+                <code>302</code> 到 MinIO 短时预签名（300s），支持切换代理直出 /
+                CDN 签名模式，源站永不裸奔
+              </li>
+            </ol>
+            <div class="flow-rail" aria-hidden="true">
+              <span>play-token 签发</span>
+              <i />
+              <span>master.m3u8</span>
+              <i />
+              <span>档位清单</span>
+              <i />
+              <span>ts 302 预签名</span>
+              <i />
+              <span>统计上报</span>
+            </div>
+            <ul class="bullet-list flow-notes">
+              <li>
+                token v3 签名串 <code>code|site|exp|d|ip|iat</code>；有效期默认 4
+                小时，可按站点策略调整；主/副双密钥支持平滑轮换
+              </li>
+              <li>
+                试看：<code>preview_sec&gt;0</code> 时清单按分片时长截断并补
+                <code>EXT-X-ENDLIST</code>，观众只能看到指定秒数
+              </li>
+              <li>
+                一键失效：总后台「平台服务 → 播放服务 →
+                链接失效」或 Admin 接口触发，约 15 秒全网生效，只打击基线前签发的链接
+              </li>
+              <li>
+                业务侧永远不要落库播放 URL——只存资产短码，播放时现签现用
+              </li>
+            </ul>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">Open · 子站接口</div>
+            <ElCollapse v-model="playOpenKeys">
+              <ElCollapseItem
+                v-for="api in playOpenApis"
+                :key="api.key"
+                :title="api.title"
+                :name="api.key"
+              >
+                <ApiEndpoint
+                  :method="api.method"
+                  :path="api.path"
+                  :summary="api.summary"
+                  :base="api.base"
+                  :auth="api.auth"
+                  :tip="api.tip"
+                  :params="api.params"
+                  :body-example="api.bodyExample"
+                  :response-example="api.responseExample"
+                  :curl="api.curl"
+                />
+              </ElCollapseItem>
+            </ElCollapse>
+          </section>
+
+          <section class="doc-card">
+            <div class="doc-card__label">Admin · 总后台接口</div>
+            <ElCollapse v-model="playAdminKeys">
+              <ElCollapseItem
+                v-for="api in playAdminApis"
+                :key="api.key"
+                :title="api.title"
+                :name="api.key"
+              >
+                <ApiEndpoint
+                  :method="api.method"
+                  :path="api.path"
+                  :summary="api.summary"
+                  :base="api.base"
+                  :auth="api.auth"
+                  :tip="api.tip"
+                  :params="api.params"
+                  :body-example="api.bodyExample"
+                  :response-example="api.responseExample"
+                  :curl="api.curl"
+                />
+              </ElCollapseItem>
+            </ElCollapse>
           </section>
         </div>
       </ElTabPane>

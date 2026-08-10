@@ -21,6 +21,7 @@ import {
   ElTabPane,
   ElTabs,
   ElTag,
+  ElUpload,
 } from "element-plus";
 
 import {
@@ -39,6 +40,11 @@ import {
   updateAdCreativeApi,
   updateAdSlotApi,
 } from "#/api/core/ad";
+import {
+  getStorageDownloadUrlApi,
+  storageApiConfigured,
+  uploadStorageObjectApi,
+} from "#/api/core/storage";
 
 defineOptions({ name: "PaasAd" });
 
@@ -187,7 +193,10 @@ const creativePage = reactive({ current: 1, pageSize: 20, total: 0 });
 const creativeSearch = reactive({ keyword: "", status: -1 });
 const creativeDialog = ref(false);
 const creativeSaving = ref(false);
+const creativeUploading = ref(false);
 const creativeEditingId = ref<string | null>(null);
+/** 列表预览用：私有桶需走统一存储预签名 download-url */
+const creativePreviewUrls = ref<Record<string, string>>({});
 const creativeForm = reactive({
   title: "",
   media_url: "",
@@ -196,6 +205,46 @@ const creativeForm = reactive({
   status: 1,
   remark: "",
 });
+
+/** 从存储 Key/URL 里抠 16 位短码：.../{site}/{biz}/{code}/{filename} */
+function extractStorageObjectId(urlOrKey: string): string {
+  const m = (urlOrKey || "").match(
+    /\/([2-9A-HJ-NP-Za-kmnp-z]{16})(?:\/|$)/,
+  );
+  return m?.[1] || "";
+}
+
+function resolveStorageObjectId(row: AdApi.CreativeItem): string {
+  return (
+    (row.storage_object_id || "").trim() ||
+    extractStorageObjectId(row.media_url)
+  );
+}
+
+async function loadCreativePreviews(list: AdApi.CreativeItem[]) {
+  if (!storageApiConfigured()) {
+    creativePreviewUrls.value = {};
+    return;
+  }
+  const next: Record<string, string> = {};
+  await Promise.all(
+    list.map(async (row) => {
+      const oid = resolveStorageObjectId(row);
+      if (!oid) return;
+      try {
+        const res = await getStorageDownloadUrlApi(oid);
+        if (res.download_url) next[row.id] = res.download_url;
+      } catch {
+        /* 单条失败忽略 */
+      }
+    }),
+  );
+  creativePreviewUrls.value = next;
+}
+
+function creativePreviewSrc(row: AdApi.CreativeItem) {
+  return creativePreviewUrls.value[row.id] || row.media_url || "";
+}
 
 async function loadCreatives() {
   if (!configured.value) return;
@@ -209,9 +258,38 @@ async function loadCreatives() {
     });
     creativeRows.value = res.list || [];
     creativePage.total = res.total || 0;
+    void loadCreativePreviews(creativeRows.value);
   } finally {
     creativeLoading.value = false;
   }
+}
+
+async function onCreativeUpload(raw: File) {
+  if (!storageApiConfigured()) {
+    ElMessage.warning("未配置统一存储 Token，无法代传");
+    return false;
+  }
+  creativeUploading.value = true;
+  try {
+    const uploaded = await uploadStorageObjectApi({
+      file: raw,
+      site_code: "AD",
+      biz: "creative",
+      remark: "ad creative",
+    });
+    creativeForm.storage_object_id = uploaded.id;
+    // 落库仍记 public_url 作引用；后台预览用短码换 download-url
+    creativeForm.media_url = uploaded.public_url || creativeForm.media_url;
+    if (!creativeForm.title.trim()) {
+      creativeForm.title = raw.name.replace(/\.[^.]+$/, "") || raw.name;
+    }
+    ElMessage.success(`已上传到统一存储 ${uploaded.id}`);
+  } catch (e: any) {
+    ElMessage.error(e?.message || "上传失败");
+  } finally {
+    creativeUploading.value = false;
+  }
+  return false;
 }
 
 function openCreativeCreate() {
@@ -598,11 +676,12 @@ onMounted(() => {
             <ElTableColumn label="预览" width="80">
               <template #default="{ row }">
                 <ElImage
-                  v-if="row.media_url"
-                  :src="row.media_url"
+                  v-if="creativePreviewSrc(row)"
+                  :src="creativePreviewSrc(row)"
                   fit="cover"
                   style="width: 48px; height: 48px; border-radius: 4px"
-                  :preview-src-list="[row.media_url]"
+                  :preview-src-list="[creativePreviewSrc(row)]"
+                  referrerpolicy="no-referrer"
                 />
                 <span v-else class="dim">-</span>
               </template>
@@ -827,10 +906,27 @@ onMounted(() => {
         <ElFormItem label="标题" required>
           <ElInput v-model="creativeForm.title" />
         </ElFormItem>
+        <ElFormItem label="上传图片">
+          <div class="upload-row">
+            <ElUpload
+              :show-file-list="false"
+              accept="image/*"
+              :disabled="creativeUploading"
+              :before-upload="onCreativeUpload"
+            >
+              <ElButton :loading="creativeUploading" type="primary" plain>
+                上传到统一存储
+              </ElButton>
+            </ElUpload>
+            <span class="dim tip">
+              私有桶 public_url 不能直接预览，需短码换 download-url
+            </span>
+          </div>
+        </ElFormItem>
         <ElFormItem label="media_url" required>
           <ElInput
             v-model="creativeForm.media_url"
-            placeholder="图片/视频 URL（建议统一存储下载地址）"
+            placeholder="可手填；推荐用上方上传自动带出"
           />
         </ElFormItem>
         <ElFormItem label="落地页 link_url">
@@ -839,7 +935,7 @@ onMounted(() => {
         <ElFormItem label="storage_object_id">
           <ElInput
             v-model="creativeForm.storage_object_id"
-            placeholder="可选，统一存储对象短码"
+            placeholder="统一存储 16 位短码（上传后自动填）"
           />
         </ElFormItem>
         <ElFormItem label="状态">
@@ -1012,6 +1108,18 @@ onMounted(() => {
 
 .dim {
   color: #9ca3af;
+}
+
+.tip {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.upload-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
 }
 
 .mt-3 {
