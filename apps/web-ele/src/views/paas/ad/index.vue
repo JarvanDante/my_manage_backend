@@ -24,6 +24,8 @@ import {
   ElUpload,
 } from "element-plus";
 
+import ConfigPublish from "../components/ConfigPublish.vue";
+
 import {
   adApiConfigured,
   createAdCampaignApi,
@@ -839,6 +841,10 @@ onMounted(() => {
               @current-change="loadCampaigns"
             />
           </div>
+        </ElTabPane>
+
+        <ElTabPane label="配置发布" name="config" lazy>
+          <ConfigPublish service="ad" />
         </ElTabPane>
       </ElTabs>
     </ElCard>
