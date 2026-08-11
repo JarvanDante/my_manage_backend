@@ -30,7 +30,11 @@ import {
   ElTableColumn,
   ElTag,
   ElUpload,
+  ElTabPane,
+  ElTabs,
 } from "element-plus";
+
+import ConfigPublish from "../components/ConfigPublish.vue";
 import Hls from "hls.js";
 
 import {
@@ -46,6 +50,8 @@ import {
 } from "#/api/core/media";
 
 defineOptions({ name: "PaasMedia" });
+
+const pageTab = ref("manage");
 
 const loading = ref(false);
 const tableData = ref<MediaApi.AssetItem[]>([]);
@@ -366,6 +372,8 @@ onMounted(() => {
 
 <template>
   <div class="p-4">
+    <ElTabs v-model="pageTab">
+    <ElTabPane label="媒资管理" name="manage">
     <ElAlert
       v-if="!configured"
       type="warning"
@@ -656,5 +664,10 @@ onMounted(() => {
         </template>
       </div>
     </ElDialog>
+    </ElTabPane>
+    <ElTabPane label="配置发布" name="config" lazy>
+      <ConfigPublish service="media" />
+    </ElTabPane>
+    </ElTabs>
   </div>
 </template>

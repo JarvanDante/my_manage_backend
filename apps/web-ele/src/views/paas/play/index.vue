@@ -30,6 +30,7 @@ import {
   revokePlayApi,
   savePlayPolicyApi,
 } from "#/api/core/play";
+import ConfigPublish from "../components/ConfigPublish.vue";
 import { getSiteListApi } from "#/api/core/site";
 
 defineOptions({ name: "PaasPlay" });
@@ -342,6 +343,11 @@ onMounted(() => {
             </ElTableColumn>
             <ElTableColumn prop="updated_at" label="操作时间" width="170" />
           </ElTable>
+        </ElTabPane>
+
+        <!-- 配置发布 -->
+        <ElTabPane label="配置发布" name="config" lazy>
+          <ConfigPublish service="play" />
         </ElTabPane>
       </ElTabs>
     </ElCard>

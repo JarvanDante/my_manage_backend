@@ -19,7 +19,11 @@ import {
   ElTableColumn,
   ElTag,
   ElUpload,
+  ElTabPane,
+  ElTabs,
 } from "element-plus";
+
+import ConfigPublish from "../components/ConfigPublish.vue";
 
 import {
   confirmStorageObjectApi,
@@ -37,6 +41,8 @@ import {
 } from "#/api/core/storage";
 
 defineOptions({ name: "PaasStorage" });
+
+const pageTab = ref("manage");
 
 const loading = ref(false);
 const tableData = ref<StorageApi.ObjectItem[]>([]);
@@ -234,6 +240,8 @@ onMounted(() => {
 
 <template>
   <div class="p-4">
+    <ElTabs v-model="pageTab">
+    <ElTabPane label="存储管理" name="manage">
     <ElAlert
       v-if="!configured"
       type="warning"
@@ -488,5 +496,10 @@ onMounted(() => {
         <ElButton @click="detailVisible = false">关闭</ElButton>
       </template>
     </ElDialog>
+    </ElTabPane>
+    <ElTabPane label="配置发布" name="config" lazy>
+      <ConfigPublish service="storage" />
+    </ElTabPane>
+    </ElTabs>
   </div>
 </template>
