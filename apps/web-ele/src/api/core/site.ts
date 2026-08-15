@@ -1,9 +1,12 @@
 import { requestClient } from "#/api/request";
 
 export namespace SiteApi {
+  export type DomainKind = "admin" | "h5" | "app";
+
   export interface DomainItem {
     id: number;
     domain: string;
+    kind: DomainKind | "";
     is_main: number;
     https: number;
     status: number;
@@ -129,10 +132,16 @@ export async function provisionCheckApi(id: number) {
 
 // ---------- 域名 ----------
 
-export async function bindDomainApi(siteId: number, domain: string, https: number) {
+export async function bindDomainApi(
+  siteId: number,
+  domain: string,
+  kind: SiteApi.DomainKind,
+  https: number,
+) {
   return requestClient.post<{ domain_id: number }>(`/sites/${siteId}/domains`, {
     id: siteId,
     domain,
+    kind,
     https,
   });
 }

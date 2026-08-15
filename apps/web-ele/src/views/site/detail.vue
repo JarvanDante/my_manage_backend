@@ -9,9 +9,13 @@ import {
   ElDescriptions,
   ElDescriptionsItem,
   ElDialog,
+  ElForm,
+  ElFormItem,
   ElInput,
   ElMessage,
   ElMessageBox,
+  ElRadioButton,
+  ElRadioGroup,
   ElSwitch,
   ElTable,
   ElTableColumn,
@@ -126,9 +130,29 @@ async function handleDbCheck() {
 }
 
 // ---------- 域名 ----------
+const domainKindLabel: Record<string, string> = {
+  admin: "admin",
+  h5: "H5",
+  app: "APP",
+};
+const domainKindTag: Record<string, "warning" | "success" | "primary"> = {
+  admin: "warning",
+  h5: "success",
+  app: "primary",
+};
+const bindDialogVisible = ref(false);
 const newDomain = ref("");
+const newDomainKind = ref<SiteApi.DomainKind>("h5");
 const newHttps = ref(true);
 const domainLoading = ref(false);
+
+function openBindDialog() {
+  newDomain.value = "";
+  newDomainKind.value = "h5";
+  newHttps.value = true;
+  bindDialogVisible.value = true;
+}
+
 async function handleBindDomain() {
   if (!newDomain.value) {
     ElMessage.warning("请输入域名");
@@ -136,9 +160,9 @@ async function handleBindDomain() {
   }
   domainLoading.value = true;
   try {
-    await bindDomainApi(siteId, newDomain.value, newHttps.value ? 1 : 0);
+    await bindDomainApi(siteId, newDomain.value, newDomainKind.value, newHttps.value ? 1 : 0);
     ElMessage.success("绑定成功(首个域名自动设为主域名)");
-    newDomain.value = "";
+    bindDialogVisible.value = false;
     fetchDetail();
   } finally {
     domainLoading.value = false;
@@ -325,21 +349,19 @@ onMounted(fetchDetail);
 
         <!-- 域名 -->
         <ElTabPane label="域名" name="domains">
-          <div class="mb-3 flex items-center gap-2">
-            <ElInput
-              v-model="newDomain"
-              placeholder="如 h5.example.com 或 localhost:5779"
-              style="width: 300px"
-              @keyup.enter="handleBindDomain"
-            />
-            <span class="text-sm">HTTPS</span>
-            <ElSwitch v-model="newHttps" />
-            <ElButton type="primary" :loading="domainLoading" @click="handleBindDomain">
-              绑定域名
-            </ElButton>
+          <div class="mb-3 flex items-center justify-end">
+            <ElButton type="primary" @click="openBindDialog">绑定域名</ElButton>
           </div>
           <ElTable :data="detail.domains" border>
             <ElTableColumn prop="domain" label="域名" min-width="220" />
+            <ElTableColumn label="用途" width="100" align="center">
+              <template #default="{ row }">
+                <ElTag v-if="row.kind" :type="domainKindTag[row.kind] || 'info'">
+                  {{ domainKindLabel[row.kind] || row.kind }}
+                </ElTag>
+                <span v-else class="text-muted-foreground">-</span>
+              </template>
+            </ElTableColumn>
             <ElTableColumn label="主域名" width="90" align="center">
               <template #default="{ row }">
                 <ElTag v-if="row.is_main === 1" type="success">主</ElTag>
@@ -480,6 +502,40 @@ onMounted(fetchDetail);
         </ElTabPane>
       </ElTabs>
     </ElCard>
+
+    <ElDialog
+      v-model="bindDialogVisible"
+      title="绑定域名"
+      width="480px"
+      destroy-on-close
+      :close-on-click-modal="false"
+    >
+      <ElForm label-width="88px">
+        <ElFormItem label="用途" required>
+          <ElRadioGroup v-model="newDomainKind">
+            <ElRadioButton value="admin">admin</ElRadioButton>
+            <ElRadioButton value="h5">H5</ElRadioButton>
+            <ElRadioButton value="app">APP</ElRadioButton>
+          </ElRadioGroup>
+        </ElFormItem>
+        <ElFormItem label="域名" required>
+          <ElInput
+            v-model="newDomain"
+            placeholder="如 h5.example.com 或 localhost:5779"
+            @keyup.enter="handleBindDomain"
+          />
+        </ElFormItem>
+        <ElFormItem label="HTTPS">
+          <ElSwitch v-model="newHttps" />
+        </ElFormItem>
+      </ElForm>
+      <template #footer>
+        <ElButton @click="bindDialogVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="domainLoading" @click="handleBindDomain">
+          绑定
+        </ElButton>
+      </template>
+    </ElDialog>
 
     <ElDialog v-model="viewDialog" title="历史版本内容" width="640px">
       <pre class="bg-muted max-h-[480px] overflow-auto rounded p-3 text-xs leading-5">{{ viewContent }}</pre>
