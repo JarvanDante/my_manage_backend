@@ -27,6 +27,8 @@ export default defineConfig(async () => {
             changeOrigin: true,
             rewrite: (path) => path.replace(/^\/media-api/, ""),
             target: "http://host.docker.internal:8004",
+            timeout: 600_000,
+            proxyTimeout: 600_000,
             ws: true,
           },
           // 统一存储 my_storage（宿主机映射 8015，避免与 jh_game :8005 冲突）
