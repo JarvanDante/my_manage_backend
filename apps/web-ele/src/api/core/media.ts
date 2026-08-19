@@ -173,6 +173,10 @@ export async function putMediaFile(uploadUrl: string, file: File) {
 }
 
 export async function importComicsZipApi(file: File) {
+  const maxBytes = 2 * 1024 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error("压缩包不能超过 2GB");
+  }
   const fd = new FormData();
   fd.append("file", file);
   const res = await fetch(`${mediaBaseURL}/admin/comics/import`, {
@@ -180,11 +184,20 @@ export async function importComicsZipApi(file: File) {
     headers: { "X-Admin-Token": mediaAdminToken },
     body: fd,
   });
-  const json = (await res.json()) as {
+  const text = await res.text();
+  let json: {
     code: number;
     message?: string;
     data: MediaApi.ImportComicsData;
   };
+  try {
+    json = JSON.parse(text);
+  } catch {
+    if (/body too large|ParseMultipartForm/i.test(text)) {
+      throw new Error("压缩包太大，单包不能超过 2GB");
+    }
+    throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
+  }
   if (!res.ok || json.code !== 0) {
     throw new Error(json.message || `导入失败 HTTP ${res.status}`);
   }
