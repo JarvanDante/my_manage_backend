@@ -54,14 +54,30 @@ export const mediaRequest = mediaClient;
 
 export namespace MediaApi {
   export interface AssetItem {
-    id: string; // 对外短码(新 16 位，历史可能 8 位)
+    id: string;
     title: string;
     cover_url: string;
     status: number;
     transcode_status: string;
     play_url: string;
     duration_sec: number;
+    kind: number;
+    category: string;
+    chapter_count: number;
     created_at: string;
+  }
+
+  export interface ComicPage {
+    filename: string;
+    key: string;
+    url: string;
+  }
+
+  export interface ComicChapter {
+    seq: number;
+    title: string;
+    page_count: number;
+    pages: ComicPage[];
   }
 
   export interface AssetDetail extends AssetItem {
@@ -71,6 +87,21 @@ export namespace MediaApi {
     transcode_job_id: string;
     transcode_error: string;
     remark: string;
+    intro: string;
+    chapters?: ComicChapter[];
+  }
+
+  export interface ImportComicsData {
+    imported: number;
+    failed_count: number;
+    list: {
+      id: string;
+      title: string;
+      category: string;
+      chapter_count: number;
+      page_count: number;
+    }[];
+    failed: { title: string; error: string }[];
   }
 
   export interface ListData {
@@ -92,6 +123,7 @@ export function getMediaAssetListApi(params: {
   size?: number;
   keyword?: string;
   status?: number;
+  kind?: number;
 }) {
   return mediaClient.get<MediaApi.ListData>("/admin/assets", { params });
 }
@@ -138,6 +170,25 @@ export async function putMediaFile(uploadUrl: string, file: File) {
   if (!res.ok) {
     throw new Error(`上传失败 HTTP ${res.status}`);
   }
+}
+
+export async function importComicsZipApi(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${mediaBaseURL}/admin/comics/import`, {
+    method: "POST",
+    headers: { "X-Admin-Token": mediaAdminToken },
+    body: fd,
+  });
+  const json = (await res.json()) as {
+    code: number;
+    message?: string;
+    data: MediaApi.ImportComicsData;
+  };
+  if (!res.ok || json.code !== 0) {
+    throw new Error(json.message || `导入失败 HTTP ${res.status}`);
+  }
+  return json.data;
 }
 
 export function mediaApiConfigured() {

@@ -43,6 +43,7 @@ import {
   getMediaAssetDetailApi,
   getMediaAssetListApi,
   getMediaUploadUrlApi,
+  importComicsZipApi,
   mediaApiConfigured,
   putMediaFile,
   triggerMediaTranscodeApi,
@@ -56,7 +57,7 @@ const pageTab = ref("manage");
 const loading = ref(false);
 const tableData = ref<MediaApi.AssetItem[]>([]);
 const pagination = reactive({ current: 1, pageSize: 20, total: 0 });
-const searchForm = reactive({ keyword: "", status: -1 });
+const searchForm = reactive({ keyword: "", status: -1, kind: -1 });
 
 const statusOptions = [
   { label: "全部状态", value: -1 },
@@ -97,6 +98,7 @@ async function fetchList() {
     const res = await getMediaAssetListApi({
       keyword: searchForm.keyword || undefined,
       status: searchForm.status,
+      kind: searchForm.kind,
       page: pagination.current,
       size: pagination.pageSize,
     });
@@ -121,6 +123,40 @@ function openCreate() {
   createForm.title = "";
   createForm.remark = "";
   createVisible.value = true;
+}
+
+const importVisible = ref(false);
+const importing = ref(false);
+const importFile = ref<File | null>(null);
+const importResult = ref<MediaApi.ImportComicsData | null>(null);
+
+function openImport() {
+  importFile.value = null;
+  importResult.value = null;
+  importVisible.value = true;
+}
+
+function onImportFileChange(file: { raw?: File }) {
+  importFile.value = file?.raw || null;
+}
+
+async function submitImport() {
+  if (!importFile.value) {
+    ElMessage.warning("请选择 zip");
+    return;
+  }
+  importing.value = true;
+  try {
+    const data = await importComicsZipApi(importFile.value);
+    importResult.value = data;
+    ElMessage.success(`已导入 ${data.imported} 部漫画`);
+    searchForm.kind = 1;
+    await fetchList();
+  } catch (e: any) {
+    ElMessage.error(e?.message || "导入失败");
+  } finally {
+    importing.value = false;
+  }
 }
 
 async function submitCreate() {
@@ -152,6 +188,7 @@ const transcoding = ref(false);
 const deleting = ref(false);
 const uploadPercent = ref(0);
 const coverSeekSec = ref(8);
+const previewChapter = ref(0);
 const videoRef = ref<HTMLVideoElement | null>(null);
 const playerError = ref("");
 let hlsPlayer: Hls | null = null;
@@ -265,6 +302,7 @@ async function openDetail(id: string) {
   detailLoading.value = true;
   detail.value = null;
   coverSeekSec.value = 8;
+  previewChapter.value = 0;
   destroyPlayer();
   try {
     detail.value = await getMediaAssetDetailApi(id);
@@ -343,7 +381,7 @@ async function onDelete(row?: { id: string; title: string }) {
   if (!target) return;
   try {
     await ElMessageBox.confirm(
-      `确认删除「${target.title}」？将同时清理 MinIO 原片与 HLS 分片，且不可恢复。`,
+      `确认删除「${target.title}」？将同时清理 MinIO 对象，且不可恢复。`,
       "删除媒资",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -390,11 +428,14 @@ onMounted(() => {
           <div>
             <div class="text-base font-semibold">媒资中心</div>
             <div class="mt-1 text-xs text-gray-500">
-              对接 my_media：上传 → 转码 → 中央池；子站经 app_key 选用
+              对接 my_media：视频上传转码；漫画 zip 直写 MinIO comics/ 前缀
             </div>
           </div>
+          <ElButton :disabled="!configured" @click="openImport">
+            批量上传漫画
+          </ElButton>
           <ElButton type="primary" :disabled="!configured" @click="openCreate">
-            新建资产
+            新建视频
           </ElButton>
         </div>
       </template>
@@ -407,6 +448,11 @@ onMounted(() => {
           class="!w-52"
           @keyup.enter="handleSearch"
         />
+        <ElSelect v-model="searchForm.kind" class="!w-32" @change="handleSearch">
+          <ElOption label="全部类型" :value="-1" />
+          <ElOption label="视频" :value="0" />
+          <ElOption label="漫画" :value="1" />
+        </ElSelect>
         <ElSelect v-model="searchForm.status" class="!w-36">
           <ElOption
             v-for="o in statusOptions"
@@ -424,6 +470,11 @@ onMounted(() => {
       <ElTable v-loading="loading" :data="tableData" stripe border>
         <ElTableColumn prop="id" label="ID" width="160" show-overflow-tooltip />
         <ElTableColumn prop="title" label="标题" min-width="160" show-overflow-tooltip />
+        <ElTableColumn label="类型" width="80">
+          <template #default="{ row }">
+            {{ row.kind === 1 ? "漫画" : "视频" }}
+          </template>
+        </ElTableColumn>
         <ElTableColumn label="封面" width="96" align="center">
           <template #default="{ row }">
             <ElImage
@@ -444,7 +495,11 @@ onMounted(() => {
             </ElTag>
           </template>
         </ElTableColumn>
-        <ElTableColumn prop="transcode_status" label="转码" width="110" />
+        <ElTableColumn prop="transcode_status" label="转码" width="110">
+          <template #default="{ row }">
+            {{ row.kind === 1 ? `${row.chapter_count || 0} 章` : row.transcode_status }}
+          </template>
+        </ElTableColumn>
         <ElTableColumn label="时长" width="90">
           <template #default="{ row }">
             {{ formatDuration(row.duration_sec) }}
@@ -500,6 +555,49 @@ onMounted(() => {
       </template>
     </ElDialog>
 
+    <ElDialog v-model="importVisible" title="批量上传漫画" width="640px" destroy-on-close>
+      <p class="mb-3 text-sm leading-relaxed text-gray-600">
+        推荐三级目录：第一级漫画名（封面/说明），第二级章节文件夹，第三级页图。
+        <code>chapters/</code> 这一层可省略。一个 zip 里可以有多部漫画，单包不超过 256MB。
+      </p>
+      <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">漫画名/                 ← 第一级：名称、封面、说明
+  cover.jpg              封面 jpg/png/webp（没有则用第一章第一页）
+  info.json              可选 title / intro / category / author
+  001_章节名/            ← 第二级：一章一个文件夹（也可包在 chapters/ 下）
+    page_001.jpg         ← 第三级：该章页图
+    page_002.jpg</pre>
+      <ElUpload
+        :auto-upload="false"
+        :limit="1"
+        accept=".zip,application/zip"
+        :on-change="onImportFileChange"
+      >
+        <ElButton>选择 zip</ElButton>
+      </ElUpload>
+      <div v-if="importResult" class="mt-4 text-sm">
+        <p>
+          成功 {{ importResult.imported }} 部
+          <span v-if="importResult.failed_count">，失败 {{ importResult.failed_count }}</span>
+        </p>
+        <ul v-if="importResult.list?.length" class="mt-2 list-disc pl-5">
+          <li v-for="item in importResult.list" :key="item.id">
+            {{ item.title }} · {{ item.chapter_count }} 章 · {{ item.page_count }} 页
+          </li>
+        </ul>
+        <ul v-if="importResult.failed?.length" class="mt-2 list-disc pl-5 text-red-500">
+          <li v-for="(item, i) in importResult.failed" :key="i">
+            {{ item.title }}：{{ item.error }}
+          </li>
+        </ul>
+      </div>
+      <template #footer>
+        <ElButton @click="importVisible = false">关闭</ElButton>
+        <ElButton type="primary" :loading="importing" @click="submitImport">
+          开始导入
+        </ElButton>
+      </template>
+    </ElDialog>
+
     <!-- 详情弹窗 + 预览 -->
     <ElDialog
       v-model="detailVisible"
@@ -512,6 +610,63 @@ onMounted(() => {
     >
       <div v-loading="detailLoading">
         <template v-if="detail">
+          <template v-if="detail.kind === 1">
+            <div class="mb-4 flex gap-4">
+              <ElImage
+                v-if="detail.cover_url"
+                :src="detail.cover_url"
+                :preview-src-list="[detail.cover_url]"
+                fit="cover"
+                preview-teleported
+                class="h-40 w-28 shrink-0 rounded border bg-gray-50"
+              />
+              <div class="min-w-0 text-sm">
+                <div class="text-base font-medium">{{ detail.title }}</div>
+                <div class="mt-2 text-gray-500">ID：{{ detail.id }}</div>
+                <div v-if="detail.category" class="mt-1 text-gray-500">
+                  分类：{{ detail.category }}
+                </div>
+                <div class="mt-1 text-gray-500">
+                  共 {{ detail.chapter_count || detail.chapters?.length || 0 }} 章
+                </div>
+                <p v-if="detail.intro" class="mt-2 line-clamp-4 text-gray-600">
+                  {{ detail.intro }}
+                </p>
+              </div>
+            </div>
+            <div class="mb-2 flex flex-wrap gap-2">
+              <ElButton
+                v-for="(ch, idx) in detail.chapters || []"
+                :key="ch.seq"
+                size="small"
+                :type="previewChapter === idx ? 'primary' : 'default'"
+                @click="previewChapter = idx"
+              >
+                {{ ch.seq }}. {{ ch.title }} ({{ ch.page_count }})
+              </ElButton>
+            </div>
+            <div
+              v-if="detail.chapters?.[previewChapter]?.pages?.length"
+              class="grid grid-cols-4 gap-2 sm:grid-cols-6"
+            >
+              <ElImage
+                v-for="p in detail.chapters[previewChapter].pages"
+                :key="p.key"
+                :src="p.url"
+                :preview-src-list="
+                  detail.chapters[previewChapter].pages.map((x) => x.url)
+                "
+                fit="cover"
+                preview-teleported
+                class="h-28 w-full rounded bg-gray-50"
+              />
+            </div>
+            <div class="mb-3 mt-6 text-sm font-medium">删除</div>
+            <ElButton type="danger" plain :loading="deleting" @click="onDelete">
+              删除漫画（含 MinIO 页图）
+            </ElButton>
+          </template>
+          <template v-else>
           <div class="mb-4 overflow-hidden rounded-md bg-black">
             <video
               v-if="detail.play_url"
@@ -661,6 +816,7 @@ onMounted(() => {
             转码依赖 Docker 中的 my_transcode + Kafka + MinIO。完成后状态变为「就绪」，子站可用
             app_key 调用 /open 选用。删除会清库记录、选用记录、转码任务，并按前缀清理对象存储。
           </p>
+          </template>
         </template>
       </div>
     </ElDialog>
