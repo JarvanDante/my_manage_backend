@@ -593,15 +593,19 @@ onMounted(() => {
 
     <ElDialog v-model="importVisible" title="批量上传漫画" width="640px" destroy-on-close>
       <p class="mb-3 text-sm leading-relaxed text-gray-600">
-        推荐三级目录：第一级漫画名（封面/说明），第二级章节文件夹，第三级页图。
-        <code>chapters/</code> 这一层可省略。一个 zip 里可以有多部漫画，单包不超过 256MB。
+        按下面目录打成 zip 上传。章节文件夹名用「第N话」，页图用 page_001.jpg 这种序号。
+        一个 zip 里可以有多部漫画，单包不超过 256MB。
       </p>
-      <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">漫画名/                 ← 第一级：名称、封面、说明
-  cover.jpg              封面 jpg/png/webp（没有则用第一章第一页）
-  info.json              可选 title / intro / category / author
-  001_章节名/            ← 第二级：一章一个文件夹（也可包在 chapters/ 下）
-    page_001.jpg         ← 第三级：该章页图
-    page_002.jpg</pre>
+      <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">漫画名/
+  cover.jpg
+  info.json                 可选，title / description / writer / types
+  漫画名第1话/
+    chapter_info.json       可选，num 为话数（title 若是整部名会忽略）
+    page_001.jpg
+    page_002.jpg
+  漫画名第2话/
+    chapter_info.json
+    page_001.jpg</pre>
       <ElUpload
         :auto-upload="false"
         :limit="1"
