@@ -1459,7 +1459,7 @@ const playAdminApis: DocApi[] = [
 
 <template>
   <div class="access-docs">
-    <ElTabs v-model="docTab" class="access-docs__tabs">
+    <ElTabs v-model="docTab" type="border-card" class="access-docs__tabs">
       <ElTabPane label="接入总览" name="overview">
         <div class="doc-stack">
           <section class="doc-hero">
@@ -2501,10 +2501,6 @@ Content-Type: application/json</pre>
 .copy-btn:hover {
   border-color: #93c5fd;
   color: #1d4ed8;
-}
-
-:deep(.access-docs__tabs .el-tabs__header) {
-  margin-bottom: 16px;
 }
 
 :deep(.access-docs__tabs .el-tabs__item) {

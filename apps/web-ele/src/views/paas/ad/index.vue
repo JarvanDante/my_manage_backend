@@ -553,8 +553,8 @@ onMounted(() => {
       />
     </ElCard>
 
-    <ElCard v-if="configured" shadow="never">
-      <ElTabs v-model="activeTab">
+    <ElCard v-if="configured" shadow="never" :body-style="{ padding: '0' }">
+      <ElTabs v-model="activeTab" type="border-card" class="!border-0 !shadow-none">
         <!-- 广告位 -->
         <ElTabPane label="广告位" name="slots">
           <div class="toolbar">
@@ -683,6 +683,7 @@ onMounted(() => {
                   fit="cover"
                   style="width: 48px; height: 48px; border-radius: 4px"
                   :preview-src-list="[creativePreviewSrc(row)]"
+                  preview-teleported
                   referrerpolicy="no-referrer"
                 />
                 <span v-else class="dim">-</span>
