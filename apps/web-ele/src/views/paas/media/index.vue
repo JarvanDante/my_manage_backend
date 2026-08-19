@@ -52,12 +52,16 @@ import {
 
 defineOptions({ name: "PaasMedia" });
 
-const pageTab = ref("manage");
+const pageTab = ref("video");
+const managePanes = [
+  { name: "video", label: "视频管理", kind: 0 },
+  { name: "comics", label: "漫画管理", kind: 1 },
+] as const;
 
 const loading = ref(false);
 const tableData = ref<MediaApi.AssetItem[]>([]);
 const pagination = reactive({ current: 1, pageSize: 20, total: 0 });
-const searchForm = reactive({ keyword: "", status: -1, kind: -1 });
+const searchForm = reactive({ keyword: "", status: -1, kind: 0 });
 
 const statusOptions = [
   { label: "全部状态", value: -1 },
@@ -114,6 +118,13 @@ function handleSearch() {
   void fetchList();
 }
 
+function onPageTabChange(name: string | number) {
+  if (name === "config") return;
+  searchForm.kind = name === "comics" ? 1 : 0;
+  pagination.current = 1;
+  void fetchList();
+}
+
 // ---------- 创建 ----------
 const createVisible = ref(false);
 const creating = ref(false);
@@ -150,7 +161,9 @@ async function submitImport() {
     const data = await importComicsZipApi(importFile.value);
     importResult.value = data;
     ElMessage.success(`已导入 ${data.imported} 部漫画`);
+    pageTab.value = "comics";
     searchForm.kind = 1;
+    pagination.current = 1;
     await fetchList();
   } catch (e: any) {
     ElMessage.error(e?.message || "导入失败");
@@ -410,8 +423,13 @@ onMounted(() => {
 
 <template>
   <div class="p-4">
-    <ElTabs v-model="pageTab" type="border-card">
-    <ElTabPane label="媒资管理" name="manage">
+    <ElTabs v-model="pageTab" type="border-card" @tab-change="onPageTabChange">
+    <ElTabPane
+      v-for="pane in managePanes"
+      :key="pane.name"
+      :label="pane.label"
+      :name="pane.name"
+    >
     <ElAlert
       v-if="!configured"
       type="warning"
@@ -426,15 +444,28 @@ onMounted(() => {
       <template #header>
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div class="text-base font-semibold">媒资中心</div>
+            <div class="text-base font-semibold">{{ pane.label }}</div>
             <div class="mt-1 text-xs text-gray-500">
-              对接 my_media：视频上传转码；漫画 zip 直写 MinIO comics/ 前缀
+              {{
+                pane.kind === 1
+                  ? "zip 直写 MinIO comics/ 前缀，无需转码"
+                  : "上传原片后转码为 HLS，封面自动截取"
+              }}
             </div>
           </div>
-          <ElButton :disabled="!configured" @click="openImport">
+          <ElButton
+            v-if="pane.kind === 1"
+            :disabled="!configured"
+            @click="openImport"
+          >
             批量上传漫画
           </ElButton>
-          <ElButton type="primary" :disabled="!configured" @click="openCreate">
+          <ElButton
+            v-else
+            type="primary"
+            :disabled="!configured"
+            @click="openCreate"
+          >
             新建视频
           </ElButton>
         </div>
@@ -448,11 +479,6 @@ onMounted(() => {
           class="!w-52"
           @keyup.enter="handleSearch"
         />
-        <ElSelect v-model="searchForm.kind" class="!w-32" @change="handleSearch">
-          <ElOption label="全部类型" :value="-1" />
-          <ElOption label="视频" :value="0" />
-          <ElOption label="漫画" :value="1" />
-        </ElSelect>
         <ElSelect v-model="searchForm.status" class="!w-36">
           <ElOption
             v-for="o in statusOptions"
@@ -470,11 +496,6 @@ onMounted(() => {
       <ElTable v-loading="loading" :data="tableData" stripe border>
         <ElTableColumn prop="id" label="ID" width="160" show-overflow-tooltip />
         <ElTableColumn prop="title" label="标题" min-width="160" show-overflow-tooltip />
-        <ElTableColumn label="类型" width="80">
-          <template #default="{ row }">
-            {{ row.kind === 1 ? "漫画" : "视频" }}
-          </template>
-        </ElTableColumn>
         <ElTableColumn label="封面" width="96" align="center">
           <template #default="{ row }">
             <ElImage
@@ -495,12 +516,22 @@ onMounted(() => {
             </ElTag>
           </template>
         </ElTableColumn>
-        <ElTableColumn prop="transcode_status" label="转码" width="110">
+        <ElTableColumn
+          v-if="pane.kind === 1"
+          label="章节"
+          width="90"
+        >
           <template #default="{ row }">
-            {{ row.kind === 1 ? `${row.chapter_count || 0} 章` : row.transcode_status }}
+            {{ row.chapter_count || 0 }} 章
           </template>
         </ElTableColumn>
-        <ElTableColumn label="时长" width="90">
+        <ElTableColumn
+          v-else
+          prop="transcode_status"
+          label="转码"
+          width="110"
+        />
+        <ElTableColumn v-if="pane.kind === 0" label="时长" width="90">
           <template #default="{ row }">
             {{ formatDuration(row.duration_sec) }}
           </template>
@@ -533,6 +564,11 @@ onMounted(() => {
         />
       </div>
     </ElCard>
+    </ElTabPane>
+    <ElTabPane label="配置发布" name="config" lazy>
+      <ConfigPublish service="media" />
+    </ElTabPane>
+    </ElTabs>
 
     <!-- 新建 -->
     <ElDialog v-model="createVisible" title="新建媒资" width="480px" destroy-on-close>
@@ -824,10 +860,5 @@ onMounted(() => {
         </template>
       </div>
     </ElDialog>
-    </ElTabPane>
-    <ElTabPane label="配置发布" name="config" lazy>
-      <ConfigPublish service="media" />
-    </ElTabPane>
-    </ElTabs>
   </div>
 </template>
