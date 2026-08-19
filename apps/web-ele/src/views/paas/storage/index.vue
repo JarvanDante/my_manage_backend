@@ -240,7 +240,7 @@ onMounted(() => {
 
 <template>
   <div class="p-4">
-    <ElTabs v-model="pageTab">
+    <ElTabs v-model="pageTab" type="border-card">
     <ElTabPane label="存储管理" name="manage">
     <ElAlert
       v-if="!configured"

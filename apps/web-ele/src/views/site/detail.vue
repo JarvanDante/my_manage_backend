@@ -300,7 +300,7 @@ onMounted(fetchDetail);
         </ElButton>
       </div>
 
-      <ElTabs v-model="activeTab" @tab-change="onTabChange">
+      <ElTabs v-model="activeTab" type="border-card" @tab-change="onTabChange">
         <!-- 基本信息 + DB -->
         <ElTabPane label="基本信息" name="info">
           <ElDescriptions :column="2" border>

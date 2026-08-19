@@ -214,8 +214,8 @@ onMounted(() => {
 
 <template>
   <div class="p-5">
-    <ElCard shadow="never">
-      <ElTabs v-model="activeTab">
+    <ElCard shadow="never" :body-style="{ padding: '0' }">
+      <ElTabs v-model="activeTab" type="border-card" class="!border-0 !shadow-none">
         <!-- 防盗链策略 -->
         <ElTabPane label="防盗链策略" name="policy">
           <div class="mb-3 flex items-center">
