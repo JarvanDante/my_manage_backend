@@ -647,18 +647,20 @@ onMounted(() => {
             </div>
             <div
               v-if="detail.chapters?.[previewChapter]?.pages?.length"
-              class="grid grid-cols-4 gap-2 sm:grid-cols-6"
+              :key="previewChapter"
+              class="max-h-[62vh] overflow-y-auto rounded border bg-neutral-900"
             >
               <ElImage
-                v-for="p in detail.chapters[previewChapter].pages"
+                v-for="(p, i) in detail.chapters[previewChapter].pages"
                 :key="p.key"
                 :src="p.url"
+                :initial-index="i"
                 :preview-src-list="
                   detail.chapters[previewChapter].pages.map((x) => x.url)
                 "
-                fit="cover"
+                fit="contain"
                 preview-teleported
-                class="h-28 w-full rounded bg-gray-50"
+                class="block w-full bg-black [&_.el-image__inner]:!h-auto [&_.el-image__inner]:!w-full"
               />
             </div>
             <div class="mb-3 mt-6 text-sm font-medium">删除</div>
