@@ -366,18 +366,8 @@ async function onTranscode() {
     const res = await triggerMediaTranscodeApi(detail.value.id, {
       cover_seek_sec: coverSeekSec.value ?? 8,
     });
-    ElMessage.success(`已投递转码 job_id=${res.job_id}`);
+    ElMessage.success(`已投递转码 job_id=${res.job_id}，完成后请点「刷新状态」`);
     await refreshDetail();
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      await refreshDetail();
-      if (
-        detail.value &&
-        (detail.value.status === 2 || detail.value.status === 3)
-      ) {
-        break;
-      }
-    }
   } finally {
     transcoding.value = false;
   }
