@@ -46,6 +46,7 @@ import {
   importComicsZipApi,
   mediaApiConfigured,
   putMediaFile,
+  replaceMediaCoverApi,
   triggerMediaTranscodeApi,
   type MediaApi,
 } from "#/api/core/media";
@@ -197,6 +198,7 @@ const detailVisible = ref(false);
 const detailLoading = ref(false);
 const detail = ref<MediaApi.AssetDetail | null>(null);
 const uploading = ref(false);
+const replacingCover = ref(false);
 const transcoding = ref(false);
 const deleting = ref(false);
 const uploadPercent = ref(0);
@@ -352,6 +354,21 @@ async function onFileChange(file: { raw?: File }) {
     ElMessage.error(e?.message || "上传失败");
   } finally {
     uploading.value = false;
+  }
+}
+
+async function onCoverChange(file: { raw?: File }) {
+  const raw = file?.raw;
+  if (!raw || !detail.value) return;
+  replacingCover.value = true;
+  try {
+    await replaceMediaCoverApi(detail.value.id, raw);
+    ElMessage.success("封面已替换");
+    await refreshDetail();
+  } catch (e: any) {
+    ElMessage.error(e?.message || "替换封面失败");
+  } finally {
+    replacingCover.value = false;
   }
 }
 
@@ -640,14 +657,29 @@ onMounted(() => {
         <template v-if="detail">
           <template v-if="detail.kind === 1">
             <div class="mb-4 flex gap-4">
-              <ElImage
-                v-if="detail.cover_url"
-                :src="detail.cover_url"
-                :preview-src-list="[detail.cover_url]"
-                fit="cover"
-                preview-teleported
-                class="h-40 w-28 shrink-0 rounded border bg-gray-50"
-              />
+              <div class="shrink-0">
+                <ElImage
+                  v-if="detail.cover_url"
+                  :src="detail.cover_url"
+                  :preview-src-list="[detail.cover_url]"
+                  fit="cover"
+                  preview-teleported
+                  class="h-40 w-28 rounded border bg-gray-50"
+                />
+                <div class="mt-2">
+                  <ElUpload
+                    :auto-upload="false"
+                    :show-file-list="false"
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    :disabled="replacingCover"
+                    :on-change="onCoverChange"
+                  >
+                    <ElButton size="small" :loading="replacingCover">
+                      替换封面
+                    </ElButton>
+                  </ElUpload>
+                </div>
+              </div>
               <div class="min-w-0 text-sm">
                 <div class="text-base font-medium">{{ detail.title }}</div>
                 <div class="mt-2 text-gray-500">ID：{{ detail.id }}</div>
@@ -744,6 +776,25 @@ onMounted(() => {
           <div class="mb-4 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
             <div><span class="text-gray-500">ID：</span>{{ detail.id }}</div>
             <div><span class="text-gray-500">标题：</span>{{ detail.title }}</div>
+            <div class="sm:col-span-2">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-gray-500">替换封面</span>
+                <ElUpload
+                  :auto-upload="false"
+                  :show-file-list="false"
+                  accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                  :disabled="replacingCover"
+                  :on-change="onCoverChange"
+                >
+                  <ElButton size="small" :loading="replacingCover">
+                    选择图片并替换
+                  </ElButton>
+                </ElUpload>
+                <span class="text-xs text-gray-400">
+                  覆盖当前封面，不触发转码；再次转码会按截取秒数重新生成
+                </span>
+              </div>
+            </div>
             <div v-if="detail.cover_url" class="sm:col-span-2">
               <span class="text-gray-500">封面：</span>
               <a
