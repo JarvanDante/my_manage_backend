@@ -161,6 +161,36 @@ export function deleteMediaAssetApi(id: string) {
   return mediaClient.delete<{ deleted_objects: number }>(`/admin/assets/${id}`);
 }
 
+/** 覆盖 MinIO 同路径 cover.jpg，不触发转码。 */
+export async function replaceMediaCoverApi(id: string, file: File) {
+  const maxBytes = 8 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error("封面不能超过 8MB");
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${mediaBaseURL}/admin/assets/${id}/cover`, {
+    method: "POST",
+    headers: { "X-Admin-Token": mediaAdminToken },
+    body: fd,
+  });
+  const text = await res.text();
+  let json: {
+    code: number;
+    message?: string;
+    data: { cover_url: string };
+  };
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(text?.slice(0, 120) || `替换封面失败 HTTP ${res.status}`);
+  }
+  if (!res.ok || json.code !== 0) {
+    throw new Error(json.message || `替换封面失败 HTTP ${res.status}`);
+  }
+  return json.data;
+}
+
 /** 直传 MinIO（预签名 PUT）。勿加未签名的 Content-Type，否则签名失效。 */
 export async function putMediaFile(uploadUrl: string, file: File) {
   const res = await fetch(uploadUrl, {
