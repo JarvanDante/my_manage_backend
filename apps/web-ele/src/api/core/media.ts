@@ -132,6 +132,7 @@ export function createMediaAssetApi(body: {
   title: string;
   cover_url?: string;
   remark?: string;
+  kind?: number;
 }) {
   return mediaClient.post<{ id: string }>("/admin/assets", body);
 }

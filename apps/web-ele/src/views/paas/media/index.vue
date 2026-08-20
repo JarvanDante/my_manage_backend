@@ -57,7 +57,12 @@ const pageTab = ref("video");
 const managePanes = [
   { name: "video", label: "视频管理", kind: 0 },
   { name: "comics", label: "漫画管理", kind: 1 },
+  { name: "cartoon", label: "动漫管理", kind: 2 },
 ] as const;
+
+const currentPane = computed(
+  () => managePanes.find((p) => p.name === pageTab.value) ?? managePanes[0],
+);
 
 const loading = ref(false);
 const tableData = ref<MediaApi.AssetItem[]>([]);
@@ -121,7 +126,8 @@ function handleSearch() {
 
 function onPageTabChange(name: string | number) {
   if (name === "config") return;
-  searchForm.kind = name === "comics" ? 1 : 0;
+  const pane = managePanes.find((p) => p.name === name);
+  searchForm.kind = pane?.kind ?? 0;
   pagination.current = 1;
   void fetchList();
 }
@@ -183,6 +189,7 @@ async function submitCreate() {
     const res = await createMediaAssetApi({
       title: createForm.title.trim(),
       remark: createForm.remark.trim(),
+      kind: searchForm.kind,
     });
     ElMessage.success(`已创建资产 #${res.id}`);
     createVisible.value = false;
@@ -456,7 +463,9 @@ onMounted(() => {
               {{
                 pane.kind === 1
                   ? "zip 直写 MinIO comics/ 前缀，无需转码"
-                  : "上传原片后转码为 HLS，封面自动截取"
+                  : pane.kind === 2
+                    ? "上传原片后转码为 HLS，对象落在 MinIO cartoon/（与 media/ 同级）"
+                    : "上传原片后转码为 HLS，封面自动截取"
               }}
             </div>
           </div>
@@ -473,7 +482,7 @@ onMounted(() => {
             :disabled="!configured"
             @click="openCreate"
           >
-            新建视频
+            {{ pane.kind === 2 ? "新建动漫" : "新建视频" }}
           </ElButton>
         </div>
       </template>
@@ -538,7 +547,7 @@ onMounted(() => {
           label="转码"
           width="110"
         />
-        <ElTableColumn v-if="pane.kind === 0" label="时长" width="90">
+        <ElTableColumn v-if="pane.kind !== 1" label="时长" width="90">
           <template #default="{ row }">
             {{ formatDuration(row.duration_sec) }}
           </template>
@@ -578,10 +587,18 @@ onMounted(() => {
     </ElTabs>
 
     <!-- 新建 -->
-    <ElDialog v-model="createVisible" title="新建媒资" width="480px" destroy-on-close>
+    <ElDialog
+      v-model="createVisible"
+      :title="currentPane.kind === 2 ? '新建动漫' : '新建视频'"
+      width="480px"
+      destroy-on-close
+    >
       <ElForm label-width="80px">
         <ElFormItem label="标题" required>
-          <ElInput v-model="createForm.title" placeholder="视频标题" />
+          <ElInput
+            v-model="createForm.title"
+            :placeholder="currentPane.kind === 2 ? '动漫标题' : '视频标题'"
+          />
         </ElFormItem>
         <ElFormItem label="备注">
           <ElInput v-model="createForm.remark" type="textarea" :rows="2" />
