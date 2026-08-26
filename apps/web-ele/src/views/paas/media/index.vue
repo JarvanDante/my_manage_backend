@@ -618,13 +618,14 @@ onMounted(() => {
     <ElDialog v-model="importVisible" title="批量上传漫画" width="640px" destroy-on-close>
       <p class="mb-3 text-sm leading-relaxed text-gray-600">
         按下面目录打成 zip 上传。章节文件夹可以是「漫画名第1话」，也可以是「001_漫画名」（导入后变成「漫画名 第1话」）。
-        一个 zip 里可以有多部漫画，单包不超过 2GB。
+        一个 zip 里可以有多部漫画，单包不超过 2GB。zip 内可用 jpg/png；入库后封面与内页都会加密成
+        <code>.bnc</code>。
       </p>
       <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">漫画名/
-  cover.jpg
+  cover.jpg                 → 入库 cover.bnc
   info.json                 可选，title / description / writer / types
   001_漫画名/                 导入后章节名为「漫画名 第1话」
-    page_001.jpg
+    page_001.jpg            → 入库 page_001.bnc
   漫画名第2话/                也可直接用第N话
     chapter_info.json       可选
     page_001.jpg</pre>
