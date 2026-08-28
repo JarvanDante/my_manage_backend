@@ -56,9 +56,29 @@ defineOptions({ name: "PaasMedia" });
 const pageTab = ref("video");
 const managePanes = [
   { name: "video", label: "视频管理", kind: 0 },
+  { name: "douyin", label: "抖音管理", kind: 3 },
   { name: "comics", label: "漫画管理", kind: 1 },
   { name: "cartoon", label: "动漫管理", kind: 2 },
 ] as const;
+
+function paneHint(kind: number) {
+  if (kind === 1) return "zip 直写 MinIO comics/ 前缀，无需转码";
+  if (kind === 2) return "上传原片后转码为 HLS，对象落在 MinIO cartoon/（与 media/ 同级）";
+  if (kind === 3) return "上传原片后转码为 HLS，对象落在 MinIO video/（与 media/ 同级）";
+  return "上传原片后转码为 HLS，封面自动截取";
+}
+
+function paneCreateLabel(kind: number) {
+  if (kind === 2) return "新建动漫";
+  if (kind === 3) return "新建抖音";
+  return "新建视频";
+}
+
+function paneTitlePlaceholder(kind: number) {
+  if (kind === 2) return "动漫标题";
+  if (kind === 3) return "抖音标题";
+  return "视频标题";
+}
 
 const currentPane = computed(
   () => managePanes.find((p) => p.name === pageTab.value) ?? managePanes[0],
@@ -460,13 +480,7 @@ onMounted(() => {
           <div>
             <div class="text-base font-semibold">{{ pane.label }}</div>
             <div class="mt-1 text-xs text-gray-500">
-              {{
-                pane.kind === 1
-                  ? "zip 直写 MinIO comics/ 前缀，无需转码"
-                  : pane.kind === 2
-                    ? "上传原片后转码为 HLS，对象落在 MinIO cartoon/（与 media/ 同级）"
-                    : "上传原片后转码为 HLS，封面自动截取"
-              }}
+              {{ paneHint(pane.kind) }}
             </div>
           </div>
           <ElButton
@@ -482,7 +496,7 @@ onMounted(() => {
             :disabled="!configured"
             @click="openCreate"
           >
-            {{ pane.kind === 2 ? "新建动漫" : "新建视频" }}
+            {{ paneCreateLabel(pane.kind) }}
           </ElButton>
         </div>
       </template>
@@ -589,7 +603,7 @@ onMounted(() => {
     <!-- 新建 -->
     <ElDialog
       v-model="createVisible"
-      :title="currentPane.kind === 2 ? '新建动漫' : '新建视频'"
+      :title="paneCreateLabel(currentPane.kind)"
       width="480px"
       destroy-on-close
     >
@@ -597,7 +611,7 @@ onMounted(() => {
         <ElFormItem label="标题" required>
           <ElInput
             v-model="createForm.title"
-            :placeholder="currentPane.kind === 2 ? '动漫标题' : '视频标题'"
+            :placeholder="paneTitlePlaceholder(currentPane.kind)"
           />
         </ElFormItem>
         <ElFormItem label="备注">

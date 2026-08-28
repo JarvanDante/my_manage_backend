@@ -61,7 +61,7 @@ export namespace MediaApi {
     transcode_status: string;
     play_url: string;
     duration_sec: number;
-    kind: number;
+    kind: number; // 0视频 1漫画 2动漫 3抖音
     category: string;
     chapter_count: number;
     created_at: string;
