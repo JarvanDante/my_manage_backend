@@ -235,7 +235,7 @@ async function handlePublish() {
     return;
   }
   await ElMessageBox.confirm(
-    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? 将保留你的配置, 自动覆盖 database.default.link, 并注入 paas.app_key / paas.app_secret。`,
+    `确认发布到 Nacos(${current.value?.data_id} @ ${detail.value?.env})? 将保留你的配置，只覆盖 database.default.link，并写入 paas.app_key / paas.app_secret（ad_base 等其余 paas 字段不动）。`,
     "发布确认",
     { type: "warning" }
   );
@@ -411,7 +411,7 @@ onMounted(fetchDetail);
               <div class="mb-2 flex items-center gap-2">
                 <span class="font-medium">编辑配置(YAML)</span>
                 <span class="text-muted-foreground text-xs">
-                  原文保留; 自动覆盖 database.default.link, 并注入 paas.app_key/app_secret
+                  原文保留; 只改 database.default.link 与 paas.app_key/app_secret
                 </span>
               </div>
               <ElInput
