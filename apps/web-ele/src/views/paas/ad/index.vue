@@ -60,11 +60,25 @@ const statusOptions = [
 ];
 
 const slotTypeOptions = [
-  { label: "banner", value: "banner" },
-  { label: "splash", value: "splash" },
-  { label: "feed", value: "feed" },
-  { label: "player", value: "player" },
+  { label: "横幅 banner", value: "banner", width: 750, height: 240 },
+  { label: "开屏 splash", value: "splash", width: 750, height: 1334 },
+  { label: "信息流 feed", value: "feed", width: 400, height: 560 },
+  { label: "播放器 player", value: "player", width: 750, height: 420 },
+  { label: "弹窗 popup", value: "popup", width: 600, height: 800 },
+  { label: "悬浮 float", value: "float", width: 240, height: 240 },
+  { label: "宫格 icon", value: "icon", width: 200, height: 200 },
 ];
+
+function slotTypeLabel(v: string) {
+  return slotTypeOptions.find((o) => o.value === v)?.label || v || "-";
+}
+
+function applySlotTypeSize(type: string) {
+  const hit = slotTypeOptions.find((o) => o.value === type);
+  if (!hit) return;
+  slotForm.width = hit.width;
+  slotForm.height = hit.height;
+}
 
 function statusTag(status: number): "success" | "info" {
   return status === 1 ? "success" : "info";
@@ -115,8 +129,8 @@ function openSlotCreate() {
     code: "",
     name: "",
     slot_type: "banner",
-    width: 0,
-    height: 0,
+    width: 750,
+    height: 240,
     status: 1,
     remark: "",
   });
@@ -593,7 +607,11 @@ onMounted(() => {
             <ElTableColumn prop="id" label="ID" width="70" />
             <ElTableColumn prop="code" label="code" min-width="120" />
             <ElTableColumn prop="name" label="名称" min-width="120" />
-            <ElTableColumn prop="slot_type" label="类型" width="90" />
+            <ElTableColumn label="类型" width="130">
+              <template #default="{ row }">
+                {{ slotTypeLabel(row.slot_type) }}
+              </template>
+            </ElTableColumn>
             <ElTableColumn label="尺寸" width="100">
               <template #default="{ row }">
                 {{ row.width || "-" }}×{{ row.height || "-" }}
@@ -869,7 +887,11 @@ onMounted(() => {
           <ElInput v-model="slotForm.name" />
         </ElFormItem>
         <ElFormItem label="类型">
-          <ElSelect v-model="slotForm.slot_type" style="width: 100%">
+          <ElSelect
+            v-model="slotForm.slot_type"
+            style="width: 100%"
+            @change="applySlotTypeSize"
+          >
             <ElOption
               v-for="o in slotTypeOptions"
               :key="o.value"

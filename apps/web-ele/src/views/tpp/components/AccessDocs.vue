@@ -926,7 +926,7 @@ const adAdminApis: DocApi[] = [
       {
         name: "slot_type",
         in: "body",
-        desc: "banner / splash / feed / player",
+        desc: "banner / splash / feed / player / popup / float / icon",
         example: "banner",
       },
       { name: "width", in: "body", type: "int", desc: "建议宽度" },
