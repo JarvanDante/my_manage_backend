@@ -16,12 +16,11 @@ const authStore = useAuthStore();
 const totpStep = ref<"none" | "bind" | "verify">("none");
 const totpQr = ref("");
 const totpSecret = ref("");
-const totpCode = ref("");
 const checkedUsername = ref("");
 
 const formSchema = computed((): VbenFormSchema[] => {
   const locked = totpStep.value !== "none";
-  return [
+  const fields: VbenFormSchema[] = [
     {
       component: "VbenInput",
       componentProps: {
@@ -43,13 +42,28 @@ const formSchema = computed((): VbenFormSchema[] => {
       rules: z.string().min(1, { message: $t("authentication.passwordTip") }),
     },
   ];
+  if (totpStep.value !== "none") {
+    fields.push({
+      component: "VbenInput",
+      componentProps: {
+        placeholder: $t("authentication.totpCodePlaceholder"),
+        maxlength: 6,
+        autocomplete: "one-time-code",
+        inputmode: "numeric",
+      },
+      fieldName: "totp_code",
+      rules: z.string().min(1, {
+        message: $t("authentication.totpCodePlaceholder"),
+      }),
+    });
+  }
+  return fields;
 });
 
 function resetTotp() {
   totpStep.value = "none";
   totpQr.value = "";
   totpSecret.value = "";
-  totpCode.value = "";
   checkedUsername.value = "";
 }
 
@@ -61,14 +75,13 @@ async function handleSubmit(values: Recordable<any>) {
   const result = await authStore.authLogin({
     username,
     password: values?.password,
-    totp_code: totpCode.value.trim(),
+    totp_code: String(values?.totp_code ?? "").trim(),
   });
   if (result.totp) {
     checkedUsername.value = username;
     totpStep.value = result.totp.bound ? "verify" : "bind";
     totpQr.value = result.totp.qr;
     totpSecret.value = result.totp.secret;
-    totpCode.value = "";
   }
 }
 </script>
@@ -98,23 +111,8 @@ async function handleSubmit(values: Recordable<any>) {
             {{ $t("authentication.totpSecretLabel") }} {{ totpSecret }}
           </p>
         </div>
-        <p
-          v-else
-          class="text-muted-foreground mb-2 text-center text-sm"
-        >
-          {{ $t("authentication.totpVerifyTip") }}
-        </p>
-        <input
-          v-model="totpCode"
-          autocomplete="one-time-code"
-          autofocus
-          class="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-center text-sm tracking-[0.4em] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
-          inputmode="numeric"
-          maxlength="6"
-          :placeholder="$t('authentication.totpCodePlaceholder')"
-        />
         <button
-          class="text-muted-foreground mt-2 w-full text-center text-xs"
+          class="text-muted-foreground w-full text-center text-xs"
           type="button"
           @click="resetTotp"
         >
