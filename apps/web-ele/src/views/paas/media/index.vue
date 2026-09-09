@@ -26,6 +26,7 @@ import {
   ElRadioButton,
   ElRadioGroup,
   ElSelect,
+  ElSwitch,
   ElTable,
   ElTableColumn,
   ElTag,
@@ -166,11 +167,13 @@ function openCreate() {
 const importVisible = ref(false);
 const importing = ref(false);
 const importFile = ref<File | null>(null);
+const importResume = ref(false);
 const importResult = ref<MediaApi.ImportComicsData | null>(null);
 
 function openImport() {
   importFile.value = null;
   importResult.value = null;
+  importResume.value = false;
   importVisible.value = true;
 }
 
@@ -185,7 +188,7 @@ async function submitImport() {
   }
   importing.value = true;
   try {
-    const data = await importComicsZipApi(importFile.value);
+    const data = await importComicsZipApi(importFile.value, importResume.value);
     importResult.value = data;
     ElMessage.success(`已导入 ${data.imported} 部漫画`);
     pageTab.value = "comics";
@@ -651,6 +654,13 @@ onMounted(() => {
       >
         <ElButton>选择 zip</ElButton>
       </ElUpload>
+      <div class="mt-3 flex items-center gap-2">
+        <span class="text-sm text-gray-700">续载</span>
+        <ElSwitch v-model="importResume" />
+        <span class="text-xs text-gray-400">
+          关闭时名称已存在会停止；开启后追加新话，已有话数跳过
+        </span>
+      </div>
       <div v-if="importResult" class="mt-4 text-sm">
         <p>
           成功 {{ importResult.imported }} 部
@@ -658,7 +668,13 @@ onMounted(() => {
         </p>
         <ul v-if="importResult.list?.length" class="mt-2 list-disc pl-5">
           <li v-for="item in importResult.list" :key="item.id">
-            {{ item.title }} · {{ item.chapter_count }} 章 · {{ item.page_count }} 页
+            <template v-if="item.appended">
+              {{ item.title }} · 追加 {{ item.chapter_count }} 章
+              <span v-if="item.skipped_count"> · 跳过 {{ item.skipped_count }} 章</span>
+            </template>
+            <template v-else>
+              {{ item.title }} · {{ item.chapter_count }} 章 · {{ item.page_count }} 页
+            </template>
           </li>
         </ul>
         <ul v-if="importResult.failed?.length" class="mt-2 list-disc pl-5 text-red-500">

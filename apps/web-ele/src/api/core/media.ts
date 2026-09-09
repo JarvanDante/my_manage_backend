@@ -100,6 +100,8 @@ export namespace MediaApi {
       category: string;
       chapter_count: number;
       page_count: number;
+      appended?: boolean;
+      skipped_count?: number;
     }[];
     failed: { title: string; error: string }[];
   }
@@ -203,13 +205,14 @@ export async function putMediaFile(uploadUrl: string, file: File) {
   }
 }
 
-export async function importComicsZipApi(file: File) {
+export async function importComicsZipApi(file: File, resume = false) {
   const maxBytes = 2 * 1024 * 1024 * 1024;
   if (file.size > maxBytes) {
     throw new Error("压缩包不能超过 2GB");
   }
   const fd = new FormData();
   fd.append("file", file);
+  fd.append("resume", resume ? "1" : "0");
   const res = await fetch(`${mediaBaseURL}/admin/comics/import`, {
     method: "POST",
     headers: { "X-Admin-Token": mediaAdminToken },
