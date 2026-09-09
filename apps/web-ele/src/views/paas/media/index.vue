@@ -41,6 +41,7 @@ import Hls from "hls.js";
 import {
   createMediaAssetApi,
   deleteMediaAssetApi,
+  deleteMediaComicChapterApi,
   getMediaAssetDetailApi,
   getMediaAssetListApi,
   getMediaUploadUrlApi,
@@ -231,6 +232,7 @@ const uploading = ref(false);
 const replacingCover = ref(false);
 const transcoding = ref(false);
 const deleting = ref(false);
+const deletingChapter = ref(0);
 const uploadPercent = ref(0);
 const coverSeekSec = ref(8);
 const previewChapter = ref(0);
@@ -433,6 +435,37 @@ async function onTranscode() {
 function openPlay() {
   if (detail.value?.play_url) {
     window.open(detail.value.play_url, "_blank");
+  }
+}
+
+async function onDeleteChapter(ch: MediaApi.ComicChapter) {
+  if (!detail.value) return;
+  try {
+    await ElMessageBox.confirm(
+      `确认删除第${ch.seq}话「${ch.title || ""}」？该集页图会一并删除且不可恢复。`,
+      "删除章节",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  const staySeq = previewChapters.value[previewChapter.value]?.seq;
+  deletingChapter.value = ch.seq;
+  try {
+    await deleteMediaComicChapterApi(detail.value.id, ch.seq);
+    ElMessage.success(`已删除第${ch.seq}话`);
+    await refreshDetail();
+    const next = previewChapters.value.findIndex((item) => item.seq === staySeq);
+    if (next >= 0) {
+      previewChapter.value = next;
+    } else {
+      previewChapter.value = Math.min(
+        previewChapter.value,
+        Math.max(previewChapters.value.length - 1, 0),
+      );
+    }
+  } finally {
+    deletingChapter.value = 0;
   }
 }
 
@@ -705,7 +738,7 @@ onMounted(() => {
     <ElDialog
       v-model="detailVisible"
       title="媒资详情"
-      width="880px"
+      :width="detail?.kind === 1 ? '1080px' : '880px'"
       top="6vh"
       destroy-on-close
       align-center
@@ -752,35 +785,77 @@ onMounted(() => {
                 </p>
               </div>
             </div>
-            <div class="mb-2 flex flex-wrap gap-2">
-              <ElButton
-                v-for="(ch, idx) in previewChapters"
-                :key="`${ch.seq}-${ch.title}`"
-                size="small"
-                :type="previewChapter === idx ? 'primary' : 'default'"
-                @click="previewChapter = idx"
+            <div class="flex min-h-[420px] gap-3">
+              <aside
+                class="flex w-52 shrink-0 flex-col overflow-hidden rounded border bg-white"
               >
-                {{ ch.seq }}. {{ ch.title }} ({{ ch.page_count }})
-              </ElButton>
-            </div>
-            <div
-              v-if="previewChapters[previewChapter]?.pages?.length"
-              :key="previewChapter"
-              class="max-h-[62vh] overflow-y-auto rounded border bg-neutral-200"
-            >
-              <div class="mx-auto w-[min(420px,100%)] bg-black">
-                <ElImage
-                  v-for="(p, i) in previewChapters[previewChapter].pages"
-                  :key="p.key"
-                  :src="p.url"
-                  :initial-index="i"
-                  :preview-src-list="
-                    previewChapters[previewChapter].pages.map((x) => x.url)
-                  "
-                  fit="contain"
-                  preview-teleported
-                  class="block w-full bg-black [&_.el-image__inner]:!h-auto [&_.el-image__inner]:!w-full"
-                />
+                <div
+                  class="border-b px-3 py-2 text-xs text-gray-500"
+                >
+                  共 {{ previewChapters.length }} 话
+                </div>
+                <div class="min-h-0 flex-1 overflow-y-auto">
+                  <div
+                    v-for="(ch, idx) in previewChapters"
+                    :key="`${ch.seq}-${ch.title}`"
+                    class="flex cursor-pointer items-center gap-1 border-b px-2 py-2 text-sm last:border-b-0"
+                    :class="
+                      previewChapter === idx
+                        ? 'bg-rose-50 text-rose-600'
+                        : 'hover:bg-gray-50'
+                    "
+                    @click="previewChapter = idx"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate font-medium">第{{ ch.seq }}话</div>
+                      <div class="truncate text-xs text-gray-400">
+                        {{ ch.title || `${ch.page_count || 0} 页` }}
+                      </div>
+                    </div>
+                    <ElButton
+                      link
+                      type="danger"
+                      size="small"
+                      :loading="deletingChapter === ch.seq"
+                      @click.stop="onDeleteChapter(ch)"
+                    >
+                      删除
+                    </ElButton>
+                  </div>
+                  <div
+                    v-if="!previewChapters.length"
+                    class="px-3 py-8 text-center text-xs text-gray-400"
+                  >
+                    暂无章节
+                  </div>
+                </div>
+              </aside>
+              <div
+                v-if="previewChapters[previewChapter]?.pages?.length"
+                :key="previewChapter"
+                class="min-w-0 flex-1 overflow-y-auto rounded border bg-neutral-200"
+                style="max-height: 62vh"
+              >
+                <div class="mx-auto w-[min(420px,100%)] bg-black">
+                  <ElImage
+                    v-for="(p, i) in previewChapters[previewChapter].pages"
+                    :key="p.key"
+                    :src="p.url"
+                    :initial-index="i"
+                    :preview-src-list="
+                      previewChapters[previewChapter].pages.map((x) => x.url)
+                    "
+                    fit="contain"
+                    preview-teleported
+                    class="block w-full bg-black [&_.el-image__inner]:!h-auto [&_.el-image__inner]:!w-full"
+                  />
+                </div>
+              </div>
+              <div
+                v-else
+                class="flex min-w-0 flex-1 items-center justify-center rounded border bg-neutral-100 text-sm text-gray-400"
+              >
+                请选择左侧集数查看图集
               </div>
             </div>
             <div class="mb-3 mt-6 text-sm font-medium">删除</div>

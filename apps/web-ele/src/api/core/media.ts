@@ -164,6 +164,12 @@ export function deleteMediaAssetApi(id: string) {
   return mediaClient.delete<{ deleted_objects: number }>(`/admin/assets/${id}`);
 }
 
+export function deleteMediaComicChapterApi(id: string, seq: number) {
+  return mediaClient.delete<{ deleted_objects: number; chapter_count: number }>(
+    `/admin/assets/${id}/chapters/${seq}`,
+  );
+}
+
 /** 覆盖 MinIO 同路径 cover.jpg，不触发转码。 */
 export async function replaceMediaCoverApi(id: string, file: File) {
   const maxBytes = 8 * 1024 * 1024;
