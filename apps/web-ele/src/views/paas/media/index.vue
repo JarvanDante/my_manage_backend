@@ -234,6 +234,16 @@ const deleting = ref(false);
 const uploadPercent = ref(0);
 const coverSeekSec = ref(8);
 const previewChapter = ref(0);
+const previewChapters = computed(() => {
+  const list = [...(detail.value?.chapters || [])];
+  list.sort((a, b) => {
+    const sa = Number(a.seq) || 0;
+    const sb = Number(b.seq) || 0;
+    if (sa !== sb) return sa - sb;
+    return String(a.title || "").localeCompare(String(b.title || ""), "zh");
+  });
+  return list;
+});
 const videoRef = ref<HTMLVideoElement | null>(null);
 const playerError = ref("");
 let hlsPlayer: Hls | null = null;
@@ -744,8 +754,8 @@ onMounted(() => {
             </div>
             <div class="mb-2 flex flex-wrap gap-2">
               <ElButton
-                v-for="(ch, idx) in detail.chapters || []"
-                :key="ch.seq"
+                v-for="(ch, idx) in previewChapters"
+                :key="`${ch.seq}-${ch.title}`"
                 size="small"
                 :type="previewChapter === idx ? 'primary' : 'default'"
                 @click="previewChapter = idx"
@@ -754,18 +764,18 @@ onMounted(() => {
               </ElButton>
             </div>
             <div
-              v-if="detail.chapters?.[previewChapter]?.pages?.length"
+              v-if="previewChapters[previewChapter]?.pages?.length"
               :key="previewChapter"
               class="max-h-[62vh] overflow-y-auto rounded border bg-neutral-200"
             >
               <div class="mx-auto w-[min(420px,100%)] bg-black">
                 <ElImage
-                  v-for="(p, i) in detail.chapters[previewChapter].pages"
+                  v-for="(p, i) in previewChapters[previewChapter].pages"
                   :key="p.key"
                   :src="p.url"
                   :initial-index="i"
                   :preview-src-list="
-                    detail.chapters[previewChapter].pages.map((x) => x.url)
+                    previewChapters[previewChapter].pages.map((x) => x.url)
                   "
                   fit="contain"
                   preview-teleported
