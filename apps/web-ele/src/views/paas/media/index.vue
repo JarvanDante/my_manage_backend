@@ -46,6 +46,7 @@ import {
   getMediaAssetListApi,
   getMediaUploadUrlApi,
   importComicsZipApi,
+  importNovelZipApi,
   mediaApiConfigured,
   putMediaFile,
   replaceMediaCoverApi,
@@ -61,13 +62,19 @@ const managePanes = [
   { name: "douyin", label: "抖音管理", kind: 3 },
   { name: "comics", label: "漫画管理", kind: 1 },
   { name: "cartoon", label: "动漫管理", kind: 2 },
+  { name: "novel", label: "小说管理", kind: 4 },
 ] as const;
 
 function paneHint(kind: number) {
   if (kind === 1) return "zip 直写 MinIO comics/ 前缀，无需转码";
   if (kind === 2) return "上传原片后转码为 HLS，对象落在 MinIO cartoon/（与 media/ 同级）";
   if (kind === 3) return "上传原片后转码为 HLS，对象落在 MinIO video/（与 media/ 同级）";
+  if (kind === 4) return "zip 导入正文进 PostgreSQL，封面写 my-media/novels/，无需转码";
   return "上传原片后转码为 HLS，封面自动截取";
+}
+
+function isChapterKind(kind: number) {
+  return kind === 1 || kind === 4;
 }
 
 function paneCreateLabel(kind: number) {
@@ -166,6 +173,7 @@ function openCreate() {
 }
 
 const importVisible = ref(false);
+const novelImportVisible = ref(false);
 const importing = ref(false);
 const importFile = ref<File | null>(null);
 const importResume = ref(false);
@@ -194,6 +202,34 @@ async function submitImport() {
     ElMessage.success(`已导入 ${data.imported} 部漫画`);
     pageTab.value = "comics";
     searchForm.kind = 1;
+    pagination.current = 1;
+    await fetchList();
+  } catch (e: any) {
+    ElMessage.error(e?.message || "导入失败");
+  } finally {
+    importing.value = false;
+  }
+}
+
+function openNovelImport() {
+  importFile.value = null;
+  importResult.value = null;
+  importResume.value = false;
+  novelImportVisible.value = true;
+}
+
+async function submitNovelImport() {
+  if (!importFile.value) {
+    ElMessage.warning("请选择 zip");
+    return;
+  }
+  importing.value = true;
+  try {
+    const data = await importNovelZipApi(importFile.value, importResume.value);
+    importResult.value = data;
+    ElMessage.success(`已导入 ${data.imported} 部小说`);
+    pageTab.value = "novel";
+    searchForm.kind = 4;
     pagination.current = 1;
     await fetchList();
   } catch (e: any) {
@@ -442,7 +478,9 @@ async function onDeleteChapter(ch: MediaApi.ComicChapter) {
   if (!detail.value) return;
   try {
     await ElMessageBox.confirm(
-      `确认删除第${ch.seq}话「${ch.title || ""}」？该集页图会一并删除且不可恢复。`,
+      detail.value.kind === 4
+        ? `确认删除第${ch.seq}章「${ch.title || ""}」？正文会一并删除且不可恢复。`
+        : `确认删除第${ch.seq}话「${ch.title || ""}」？该集页图会一并删除且不可恢复。`,
       "删除章节",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -537,6 +575,13 @@ onMounted(() => {
             批量上传漫画
           </ElButton>
           <ElButton
+            v-else-if="pane.kind === 4"
+            :disabled="!configured"
+            @click="openNovelImport"
+          >
+            批量上传小说
+          </ElButton>
+          <ElButton
             v-else
             type="primary"
             :disabled="!configured"
@@ -593,7 +638,7 @@ onMounted(() => {
           </template>
         </ElTableColumn>
         <ElTableColumn
-          v-if="pane.kind === 1"
+          v-if="isChapterKind(pane.kind)"
           label="章节"
           width="90"
         >
@@ -602,12 +647,21 @@ onMounted(() => {
           </template>
         </ElTableColumn>
         <ElTableColumn
-          v-else
+          v-if="pane.kind === 4"
+          label="字数"
+          width="100"
+        >
+          <template #default="{ row }">
+            {{ row.word_count || 0 }}
+          </template>
+        </ElTableColumn>
+        <ElTableColumn
+          v-if="!isChapterKind(pane.kind)"
           prop="transcode_status"
           label="转码"
           width="110"
         />
-        <ElTableColumn v-if="pane.kind !== 1" label="时长" width="90">
+        <ElTableColumn v-if="!isChapterKind(pane.kind)" label="时长" width="90">
           <template #default="{ row }">
             {{ formatDuration(row.duration_sec) }}
           </template>
@@ -734,11 +788,72 @@ onMounted(() => {
       </template>
     </ElDialog>
 
+    <ElDialog v-model="novelImportVisible" title="批量上传小说" width="640px" destroy-on-close>
+      <p class="mb-3 text-sm leading-relaxed text-gray-600">
+        按下面目录打成 zip 上传。兼容采集工具
+        <code>library/</code>
+        的书目录。一个 zip 可含多部，单包不超过 200MB。正文写入数据库；封面可选，入库成
+        <code>novels/{code}/cover.bnc</code>。
+      </p>
+      <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">书名/
+  meta.json                 可选
+  cover.jpg                 可选，入库成 cover.bnc
+  01-第一章.txt
+  02-第二章.txt
+
+分类/书名/                  也可带一层分类目录
+  01-第一章.txt</pre>
+      <ElUpload
+        :auto-upload="false"
+        :limit="1"
+        accept=".zip,application/zip"
+        :on-change="onImportFileChange"
+      >
+        <ElButton>选择 zip</ElButton>
+      </ElUpload>
+      <div class="mt-3 flex items-center gap-2">
+        <span class="text-sm text-gray-700">续载</span>
+        <ElSwitch v-model="importResume" />
+        <span class="text-xs text-gray-400">
+          关闭时名称已存在会停止；开启后追加新章，已有章序跳过
+        </span>
+      </div>
+      <div v-if="importResult" class="mt-4 text-sm">
+        <p>
+          成功 {{ importResult.imported }} 部
+          <span v-if="importResult.failed_count">，失败 {{ importResult.failed_count }}</span>
+        </p>
+        <ul v-if="importResult.list?.length" class="mt-2 list-disc pl-5">
+          <li v-for="item in importResult.list" :key="item.id">
+            <template v-if="item.appended">
+              {{ item.title }} · 追加 {{ item.chapter_count }} 章
+              <span v-if="item.skipped_count"> · 跳过 {{ item.skipped_count }} 章</span>
+            </template>
+            <template v-else>
+              {{ item.title }} · {{ item.chapter_count }} 章
+              <span v-if="item.word_count"> · {{ item.word_count }} 字</span>
+            </template>
+          </li>
+        </ul>
+        <ul v-if="importResult.failed?.length" class="mt-2 list-disc pl-5 text-red-500">
+          <li v-for="(item, i) in importResult.failed" :key="i">
+            {{ item.title }}：{{ item.error }}
+          </li>
+        </ul>
+      </div>
+      <template #footer>
+        <ElButton @click="novelImportVisible = false">关闭</ElButton>
+        <ElButton type="primary" :loading="importing" @click="submitNovelImport">
+          开始导入
+        </ElButton>
+      </template>
+    </ElDialog>
+
     <!-- 详情弹窗 + 预览 -->
     <ElDialog
       v-model="detailVisible"
       title="媒资详情"
-      :width="detail?.kind === 1 ? '1080px' : '880px'"
+      :width="isChapterKind(detail?.kind || 0) ? '1080px' : '880px'"
       top="6vh"
       destroy-on-close
       align-center
@@ -861,6 +976,117 @@ onMounted(() => {
             <div class="mb-3 mt-6 text-sm font-medium">删除</div>
             <ElButton type="danger" plain :loading="deleting" @click="onDelete">
               删除漫画（含 MinIO 页图）
+            </ElButton>
+          </template>
+          <template v-else-if="detail.kind === 4">
+            <div class="mb-4 flex gap-4">
+              <div class="shrink-0">
+                <ElImage
+                  v-if="detail.cover_url"
+                  :src="detail.cover_url"
+                  :preview-src-list="[detail.cover_url]"
+                  fit="cover"
+                  preview-teleported
+                  class="h-40 w-28 rounded border bg-gray-50"
+                />
+                <div class="mt-2">
+                  <ElUpload
+                    :auto-upload="false"
+                    :show-file-list="false"
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    :disabled="replacingCover"
+                    :on-change="onCoverChange"
+                  >
+                    <ElButton size="small" :loading="replacingCover">
+                      替换封面
+                    </ElButton>
+                  </ElUpload>
+                </div>
+              </div>
+              <div class="min-w-0 text-sm">
+                <div class="text-base font-medium">{{ detail.title }}</div>
+                <div class="mt-2 text-gray-500">ID：{{ detail.id }}</div>
+                <div v-if="detail.category" class="mt-1 text-gray-500">
+                  分类：{{ detail.category }}
+                </div>
+                <div class="mt-1 text-gray-500">
+                  共 {{ detail.chapter_count || detail.chapters?.length || 0 }} 章
+                  <span v-if="detail.word_count"> · {{ detail.word_count }} 字</span>
+                </div>
+                <p v-if="detail.intro" class="mt-2 line-clamp-4 text-gray-600">
+                  {{ detail.intro }}
+                </p>
+              </div>
+            </div>
+            <div class="flex min-h-[420px] gap-3">
+              <aside
+                class="flex w-52 shrink-0 flex-col overflow-hidden rounded border bg-white"
+              >
+                <div class="border-b px-3 py-2 text-xs text-gray-500">
+                  共 {{ previewChapters.length }} 章
+                </div>
+                <div class="min-h-0 flex-1 overflow-y-auto">
+                  <div
+                    v-for="(ch, idx) in previewChapters"
+                    :key="`${ch.seq}-${ch.title}`"
+                    class="flex cursor-pointer items-center gap-1 border-b px-2 py-2 text-sm last:border-b-0"
+                    :class="
+                      previewChapter === idx
+                        ? 'bg-rose-50 text-rose-600'
+                        : 'hover:bg-gray-50'
+                    "
+                    @click="previewChapter = idx"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate font-medium">第{{ ch.seq }}章</div>
+                      <div class="truncate text-xs text-gray-400">
+                        {{ ch.title || `${ch.word_count || 0} 字` }}
+                      </div>
+                    </div>
+                    <ElButton
+                      link
+                      type="danger"
+                      size="small"
+                      :loading="deletingChapter === ch.seq"
+                      @click.stop="onDeleteChapter(ch)"
+                    >
+                      删除
+                    </ElButton>
+                  </div>
+                  <div
+                    v-if="!previewChapters.length"
+                    class="px-3 py-8 text-center text-xs text-gray-400"
+                  >
+                    暂无章节
+                  </div>
+                </div>
+              </aside>
+              <div
+                v-if="previewChapters[previewChapter]"
+                :key="previewChapter"
+                class="min-w-0 flex-1 overflow-y-auto rounded border bg-white p-4 text-sm leading-7 text-gray-800 whitespace-pre-wrap"
+                style="max-height: 62vh"
+              >
+                <div class="mb-3 text-base font-medium">
+                  {{ previewChapters[previewChapter].title }}
+                </div>
+                <div class="text-xs text-gray-400">
+                  {{ previewChapters[previewChapter].word_count || 0 }} 字
+                </div>
+                <div class="mt-3">
+                  {{ previewChapters[previewChapter].content || "（无正文）" }}
+                </div>
+              </div>
+              <div
+                v-else
+                class="flex min-w-0 flex-1 items-center justify-center rounded border bg-neutral-100 text-sm text-gray-400"
+              >
+                请选择左侧章节查看正文
+              </div>
+            </div>
+            <div class="mb-3 mt-6 text-sm font-medium">删除</div>
+            <ElButton type="danger" plain :loading="deleting" @click="onDelete">
+              删除小说
             </ElButton>
           </template>
           <template v-else>

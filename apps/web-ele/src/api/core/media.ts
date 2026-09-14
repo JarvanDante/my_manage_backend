@@ -61,9 +61,10 @@ export namespace MediaApi {
     transcode_status: string;
     play_url: string;
     duration_sec: number;
-    kind: number; // 0视频 1漫画 2动漫 3抖音
+    kind: number; // 0视频 1漫画 2动漫 3抖音 4小说
     category: string;
     chapter_count: number;
+    word_count?: number;
     created_at: string;
   }
 
@@ -77,7 +78,9 @@ export namespace MediaApi {
     seq: number;
     title: string;
     page_count: number;
-    pages: ComicPage[];
+    pages?: ComicPage[];
+    content?: string;
+    word_count?: number;
   }
 
   export interface AssetDetail extends AssetItem {
@@ -99,7 +102,8 @@ export namespace MediaApi {
       title: string;
       category: string;
       chapter_count: number;
-      page_count: number;
+      page_count?: number;
+      word_count?: number;
       appended?: boolean;
       skipped_count?: number;
     }[];
@@ -235,6 +239,39 @@ export async function importComicsZipApi(file: File, resume = false) {
   } catch {
     if (/body too large|ParseMultipartForm/i.test(text)) {
       throw new Error("压缩包太大，单包不能超过 2GB");
+    }
+    throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
+  }
+  if (!res.ok || json.code !== 0) {
+    throw new Error(json.message || `导入失败 HTTP ${res.status}`);
+  }
+  return json.data;
+}
+
+export async function importNovelZipApi(file: File, resume = false) {
+  const maxBytes = 200 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error("压缩包不能超过 200MB");
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("resume", resume ? "1" : "0");
+  const res = await fetch(`${mediaBaseURL}/admin/novels/import`, {
+    method: "POST",
+    headers: { "X-Admin-Token": mediaAdminToken },
+    body: fd,
+  });
+  const text = await res.text();
+  let json: {
+    code: number;
+    message?: string;
+    data: MediaApi.ImportComicsData;
+  };
+  try {
+    json = JSON.parse(text);
+  } catch {
+    if (/body too large|ParseMultipartForm/i.test(text)) {
+      throw new Error("压缩包太大，单包不能超过 200MB");
     }
     throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
   }
