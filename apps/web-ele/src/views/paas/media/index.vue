@@ -40,6 +40,7 @@ import Hls from "hls.js";
 
 import {
   createMediaAssetApi,
+  createMediaNovelChapterApi,
   deleteMediaAssetApi,
   deleteMediaComicChapterApi,
   getMediaAssetDetailApi,
@@ -51,6 +52,7 @@ import {
   putMediaFile,
   replaceMediaCoverApi,
   triggerMediaTranscodeApi,
+  updateMediaNovelChapterApi,
   type MediaApi,
 } from "#/api/core/media";
 
@@ -272,6 +274,11 @@ const deletingChapter = ref(0);
 const uploadPercent = ref(0);
 const coverSeekSec = ref(8);
 const previewChapter = ref(0);
+const savingChapter = ref(false);
+const addingChapter = ref(false);
+const addChapterVisible = ref(false);
+const novelEdit = reactive({ title: "", content: "" });
+const addChapterForm = reactive({ seq: 1, title: "", content: "" });
 const previewChapters = computed(() => {
   const list = [...(detail.value?.chapters || [])];
   list.sort((a, b) => {
@@ -471,6 +478,78 @@ async function onTranscode() {
 function openPlay() {
   if (detail.value?.play_url) {
     window.open(detail.value.play_url, "_blank");
+  }
+}
+
+function syncNovelEdit() {
+  const ch = previewChapters.value[previewChapter.value];
+  novelEdit.title = ch?.title || "";
+  novelEdit.content = ch?.content || "";
+}
+
+watch(
+  () => [previewChapter.value, detail.value?.id, previewChapters.value.length] as const,
+  syncNovelEdit,
+);
+
+function openAddChapter() {
+  const max = previewChapters.value.reduce((m, ch) => Math.max(m, Number(ch.seq) || 0), 0);
+  addChapterForm.seq = max + 1;
+  addChapterForm.title = `第${max + 1}章`;
+  addChapterForm.content = "";
+  addChapterVisible.value = true;
+}
+
+async function onAddChapter() {
+  if (!detail.value) return;
+  const title = addChapterForm.title.trim();
+  if (!title) {
+    ElMessage.warning("请填写章节标题");
+    return;
+  }
+  addingChapter.value = true;
+  try {
+    const res = await createMediaNovelChapterApi(detail.value.id, {
+      seq: addChapterForm.seq,
+      title,
+      content: addChapterForm.content,
+    });
+    ElMessage.success(`已新增第${res.seq}章`);
+    addChapterVisible.value = false;
+    await refreshDetail();
+    const idx = previewChapters.value.findIndex((item) => item.seq === res.seq);
+    previewChapter.value = idx >= 0 ? idx : previewChapters.value.length - 1;
+  } catch (e: any) {
+    ElMessage.error(e?.message || "新增章节失败");
+  } finally {
+    addingChapter.value = false;
+  }
+}
+
+async function onSaveChapter() {
+  if (!detail.value) return;
+  const ch = previewChapters.value[previewChapter.value];
+  if (!ch) return;
+  const title = novelEdit.title.trim();
+  if (!title) {
+    ElMessage.warning("请填写章节标题");
+    return;
+  }
+  savingChapter.value = true;
+  try {
+    await updateMediaNovelChapterApi(detail.value.id, ch.seq, {
+      title,
+      content: novelEdit.content,
+    });
+    ElMessage.success("章节已保存");
+    const staySeq = ch.seq;
+    await refreshDetail();
+    const next = previewChapters.value.findIndex((item) => item.seq === staySeq);
+    if (next >= 0) previewChapter.value = next;
+  } catch (e: any) {
+    ElMessage.error(e?.message || "保存章节失败");
+  } finally {
+    savingChapter.value = false;
   }
 }
 
@@ -1022,8 +1101,13 @@ onMounted(() => {
               <aside
                 class="flex w-52 shrink-0 flex-col overflow-hidden rounded border bg-white"
               >
-                <div class="border-b px-3 py-2 text-xs text-gray-500">
-                  共 {{ previewChapters.length }} 章
+                <div
+                  class="flex items-center justify-between gap-1 border-b px-3 py-2 text-xs text-gray-500"
+                >
+                  <span>共 {{ previewChapters.length }} 章</span>
+                  <ElButton link type="primary" size="small" @click="openAddChapter">
+                    新增
+                  </ElButton>
                 </div>
                 <div class="min-h-0 flex-1 overflow-y-auto">
                   <div
@@ -1063,25 +1147,40 @@ onMounted(() => {
               </aside>
               <div
                 v-if="previewChapters[previewChapter]"
-                :key="previewChapter"
-                class="min-w-0 flex-1 overflow-y-auto rounded border bg-white p-4 text-sm leading-7 text-gray-800 whitespace-pre-wrap"
+                :key="previewChapters[previewChapter].seq"
+                class="flex min-w-0 flex-1 flex-col overflow-hidden rounded border bg-white p-4"
                 style="max-height: 62vh"
               >
-                <div class="mb-3 text-base font-medium">
-                  {{ previewChapters[previewChapter].title }}
+                <ElInput
+                  v-model="novelEdit.title"
+                  placeholder="章节标题"
+                  class="mb-2"
+                />
+                <div class="mb-2 text-xs text-gray-400">
+                  {{ [...novelEdit.content].length }} 字
                 </div>
-                <div class="text-xs text-gray-400">
-                  {{ previewChapters[previewChapter].word_count || 0 }} 字
-                </div>
-                <div class="mt-3">
-                  {{ previewChapters[previewChapter].content || "（无正文）" }}
+                <ElInput
+                  v-model="novelEdit.content"
+                  type="textarea"
+                  :rows="16"
+                  placeholder="章节正文"
+                />
+                <div class="mt-3 flex justify-end">
+                  <ElButton
+                    type="primary"
+                    :loading="savingChapter"
+                    @click="onSaveChapter"
+                  >
+                    保存本章
+                  </ElButton>
                 </div>
               </div>
               <div
                 v-else
-                class="flex min-w-0 flex-1 items-center justify-center rounded border bg-neutral-100 text-sm text-gray-400"
+                class="flex min-w-0 flex-1 flex-col items-center justify-center gap-3 rounded border bg-neutral-100 text-sm text-gray-400"
               >
-                请选择左侧章节查看正文
+                <span>暂无章节，先新增一章</span>
+                <ElButton type="primary" @click="openAddChapter">新增章节</ElButton>
               </div>
             </div>
             <div class="mb-3 mt-6 text-sm font-medium">删除</div>
@@ -1261,6 +1360,43 @@ onMounted(() => {
           </template>
         </template>
       </div>
+    </ElDialog>
+
+    <ElDialog
+      v-model="addChapterVisible"
+      title="新增章节"
+      width="720px"
+      destroy-on-close
+      append-to-body
+    >
+      <ElForm label-width="72px">
+        <ElFormItem label="章序">
+          <ElInputNumber
+            v-model="addChapterForm.seq"
+            :min="1"
+            :max="99999"
+            controls-position="right"
+            class="!w-36"
+          />
+        </ElFormItem>
+        <ElFormItem label="标题">
+          <ElInput v-model="addChapterForm.title" placeholder="章节标题" />
+        </ElFormItem>
+        <ElFormItem label="正文">
+          <ElInput
+            v-model="addChapterForm.content"
+            type="textarea"
+            :rows="14"
+            placeholder="章节正文"
+          />
+        </ElFormItem>
+      </ElForm>
+      <template #footer>
+        <ElButton @click="addChapterVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="addingChapter" @click="onAddChapter">
+          新增
+        </ElButton>
+      </template>
     </ElDialog>
   </div>
 </template>

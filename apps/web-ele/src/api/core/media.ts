@@ -174,6 +174,29 @@ export function deleteMediaComicChapterApi(id: string, seq: number) {
   );
 }
 
+export function createMediaNovelChapterApi(
+  id: string,
+  body: { seq?: number; title: string; content: string },
+) {
+  return mediaClient.post<{
+    seq: number;
+    word_count: number;
+    chapter_count: number;
+  }>(`/admin/assets/${id}/novel-chapters`, body);
+}
+
+export function updateMediaNovelChapterApi(
+  id: string,
+  seq: number,
+  body: { title: string; content: string },
+) {
+  return mediaClient.put<{
+    seq: number;
+    word_count: number;
+    chapter_count: number;
+  }>(`/admin/assets/${id}/novel-chapters/${seq}`, body);
+}
+
 /** 覆盖 MinIO 同路径 cover.jpg，不触发转码。 */
 export async function replaceMediaCoverApi(id: string, file: File) {
   const maxBytes = 8 * 1024 * 1024;
