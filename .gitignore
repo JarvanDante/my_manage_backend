@@ -6,3 +6,5 @@ turbo-build.log
 dist/
 **/dist/
 _to_delete/
+# 本地覆盖配置（如 .env.test.local 里的测试 token）不入库。
+*.local
