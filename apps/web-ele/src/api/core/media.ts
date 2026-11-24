@@ -61,10 +61,14 @@ export namespace MediaApi {
     transcode_status: string;
     play_url: string;
     duration_sec: number;
-    kind: number; // 0视频 1漫画 2动漫 3抖音 4小说
+    kind: number; // 0视频 1漫画 2动漫 3抖音 4小说 5短剧
     category: string;
     chapter_count: number;
     word_count?: number;
+    parent_id?: number;
+    seq?: number;
+    update_status?: number;
+    intro?: string;
     created_at: string;
   }
 
@@ -83,6 +87,19 @@ export namespace MediaApi {
     word_count?: number;
   }
 
+  export interface DramaEpisode {
+    id: string;
+    seq: number;
+    title: string;
+    status: number;
+    transcode_status: string;
+    play_url: string;
+    duration_sec: number;
+    source_key: string;
+    cover_url?: string;
+    transcode_error?: string;
+  }
+
   export interface AssetDetail extends AssetItem {
     source_bucket: string;
     source_key: string;
@@ -92,6 +109,30 @@ export namespace MediaApi {
     remark: string;
     intro: string;
     chapters?: ComicChapter[];
+    episodes?: DramaEpisode[];
+  }
+
+  export interface DramaImportLimits {
+    max_zip_bytes: number;
+    max_extract_bytes: number;
+    max_files: number;
+    max_file_bytes: number;
+    max_ratio: number;
+    min_free_bytes: number;
+  }
+
+  export interface ImportDramasData {
+    imported: number;
+    failed_count: number;
+    list: {
+      id: string;
+      title: string;
+      chapter_count: number;
+      appended?: boolean;
+      skipped_count?: number;
+      imported_count?: number;
+    }[];
+    failed: { title: string; error: string }[];
   }
 
   export interface ImportComicsData {
@@ -139,8 +180,34 @@ export function createMediaAssetApi(body: {
   cover_url?: string;
   remark?: string;
   kind?: number;
+  intro?: string;
+  update_status?: number;
 }) {
   return mediaClient.post<{ id: string }>("/admin/assets", body);
+}
+
+export function updateMediaAssetApi(
+  id: string,
+  body: {
+    title?: string;
+    remark?: string;
+    intro?: string;
+    update_status?: number;
+    seq?: number;
+  },
+) {
+  return mediaClient.put<{ id: string }>(`/admin/assets/${id}`, body);
+}
+
+export function createMediaEpisodeApi(id: string, body: { seq: number; title?: string }) {
+  return mediaClient.post<{ id: string; created: boolean }>(
+    `/admin/assets/${id}/episodes`,
+    body,
+  );
+}
+
+export function getDramaImportLimitsApi() {
+  return mediaClient.get<MediaApi.DramaImportLimits>("/admin/dramas/import-limits");
 }
 
 export function getMediaAssetDetailApi(id: string) {
@@ -295,6 +362,45 @@ export async function importNovelZipApi(file: File, resume = false) {
   } catch {
     if (/body too large|ParseMultipartForm/i.test(text)) {
       throw new Error("压缩包太大，单包不能超过 200MB");
+    }
+    throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
+  }
+  if (!res.ok || json.code !== 0) {
+    throw new Error(json.message || `导入失败 HTTP ${res.status}`);
+  }
+  return json.data;
+}
+
+export async function importDramaZipApi(
+  file: File,
+  opts: { resume?: boolean; plan?: unknown; maxBytes?: number },
+) {
+  const maxBytes = opts.maxBytes ?? 2 * 1024 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(`压缩包不能超过 ${Math.round(maxBytes / 1024 / 1024 / 1024)}GB`);
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("resume", opts.resume ? "1" : "0");
+  if (opts.plan) {
+    fd.append("plan", JSON.stringify(opts.plan));
+  }
+  const res = await fetch(`${mediaBaseURL}/admin/dramas/import`, {
+    method: "POST",
+    headers: { "X-Admin-Token": mediaAdminToken },
+    body: fd,
+  });
+  const text = await res.text();
+  let json: {
+    code: number;
+    message?: string;
+    data: MediaApi.ImportDramasData;
+  };
+  try {
+    json = JSON.parse(text);
+  } catch {
+    if (/body too large|ParseMultipartForm/i.test(text)) {
+      throw new Error("压缩包太大，超过服务器请求体上限");
     }
     throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
   }

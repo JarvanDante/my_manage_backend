@@ -40,21 +40,35 @@ import Hls from "hls.js";
 
 import {
   createMediaAssetApi,
+  createMediaEpisodeApi,
   createMediaNovelChapterApi,
   deleteMediaAssetApi,
   deleteMediaComicChapterApi,
+  getDramaImportLimitsApi,
   getMediaAssetDetailApi,
   getMediaAssetListApi,
   getMediaUploadUrlApi,
   importComicsZipApi,
+  importDramaZipApi,
   importNovelZipApi,
   mediaApiConfigured,
   putMediaFile,
   replaceMediaCoverApi,
   triggerMediaTranscodeApi,
+  updateMediaAssetApi,
   updateMediaNovelChapterApi,
   type MediaApi,
 } from "#/api/core/media";
+
+import {
+  buildImportPlan,
+  checkZipLimits,
+  groupDramaZip,
+  humanBytes,
+  listZipEntries,
+  type DramaImportLimits,
+  type DramaZipGroup,
+} from "./dramaZip";
 
 defineOptions({ name: "PaasMedia" });
 
@@ -65,6 +79,7 @@ const managePanes = [
   { name: "comics", label: "漫画管理", kind: 1 },
   { name: "cartoon", label: "动漫管理", kind: 2 },
   { name: "novel", label: "小说管理", kind: 4 },
+  { name: "drama", label: "短剧管理", kind: 5 },
 ] as const;
 
 function paneHint(kind: number) {
@@ -72,22 +87,25 @@ function paneHint(kind: number) {
   if (kind === 2) return "上传原片后转码为 HLS，对象落在 MinIO cartoon/（与 media/ 同级）";
   if (kind === 3) return "上传原片后转码为 HLS，对象落在 MinIO video/（与 media/ 同级）";
   if (kind === 4) return "zip 导入正文进 PostgreSQL，封面写 my-media/novels/，无需转码";
+  if (kind === 5) return "zip 按目录名入库，对象落在 MinIO drama/；剧集转码为 HLS";
   return "上传原片后转码为 HLS，封面自动截取";
 }
 
-function isChapterKind(kind: number) {
-  return kind === 1 || kind === 4;
+function isSeriesListKind(kind: number) {
+  return kind === 1 || kind === 4 || kind === 5;
 }
 
 function paneCreateLabel(kind: number) {
   if (kind === 2) return "新建动漫";
   if (kind === 3) return "新建抖音";
+  if (kind === 5) return "新建短剧";
   return "新建视频";
 }
 
 function paneTitlePlaceholder(kind: number) {
   if (kind === 2) return "动漫标题";
   if (kind === 3) return "抖音标题";
+  if (kind === 5) return "短剧标题";
   return "视频标题";
 }
 
@@ -166,11 +184,13 @@ function onPageTabChange(name: string | number) {
 // ---------- 创建 ----------
 const createVisible = ref(false);
 const creating = ref(false);
-const createForm = reactive({ title: "", remark: "" });
+const createForm = reactive({ title: "", remark: "", intro: "", update_status: 1 });
 
 function openCreate() {
   createForm.title = "";
   createForm.remark = "";
+  createForm.intro = "";
+  createForm.update_status = 1;
   createVisible.value = true;
 }
 
@@ -180,6 +200,21 @@ const importing = ref(false);
 const importFile = ref<File | null>(null);
 const importResume = ref(false);
 const importResult = ref<MediaApi.ImportComicsData | null>(null);
+const dramaImportVisible = ref(false);
+const dramaImporting = ref(false);
+const dramaImportFile = ref<File | null>(null);
+const dramaImportResume = ref(true);
+const dramaImportConfirmed = ref(false);
+const dramaImportError = ref("");
+const dramaImportGroups = ref<DramaZipGroup[]>([]);
+const dramaImportLimits = ref<DramaImportLimits | null>(null);
+const dramaImportResult = ref<MediaApi.ImportDramasData | null>(null);
+const dramaEdit = reactive({ title: "", intro: "", remark: "", update_status: 1 });
+const episodeForm = reactive({ seq: 1, title: "" });
+const selectedEpisodeId = ref("");
+const savingDrama = ref(false);
+const addingEpisode = ref(false);
+
 
 function openImport() {
   importFile.value = null;
@@ -252,6 +287,8 @@ async function submitCreate() {
       title: createForm.title.trim(),
       remark: createForm.remark.trim(),
       kind: searchForm.kind,
+      intro: createForm.intro.trim() || undefined,
+      update_status: searchForm.kind === 5 ? createForm.update_status : undefined,
     });
     ElMessage.success(`已创建资产 #${res.id}`);
     createVisible.value = false;
@@ -384,8 +421,17 @@ async function setupPlayer(url: string) {
   playerError.value = "当前浏览器不支持 HLS 播放";
 }
 
+const playTargetUrl = computed(() => {
+  if (!detail.value) return "";
+  if (detail.value.kind === 5) {
+    const ep = (detail.value.episodes || []).find((x) => x.id === selectedEpisodeId.value);
+    return ep?.play_url || "";
+  }
+  return detail.value.play_url || "";
+});
+
 watch(
-  () => [detailVisible.value, detail.value?.play_url] as const,
+  () => [detailVisible.value, playTargetUrl.value] as const,
   ([visible, url]) => {
     if (visible && url) {
       void setupPlayer(url);
@@ -406,8 +452,31 @@ async function openDetail(id: string) {
   destroyPlayer();
   try {
     detail.value = await getMediaAssetDetailApi(id);
+    syncDramaDetail(detail.value);
   } finally {
     detailLoading.value = false;
+  }
+}
+
+function syncDramaDetail(d: MediaApi.AssetDetail | null) {
+  if (!d || d.kind !== 5) {
+    selectedEpisodeId.value = "";
+    return;
+  }
+  dramaEdit.title = d.title || "";
+  dramaEdit.intro = d.intro || "";
+  dramaEdit.remark = d.remark || "";
+  dramaEdit.update_status = d.update_status === 2 ? 2 : 1;
+  const eps = d.episodes || [];
+  if (selectedEpisodeId.value && eps.some((x) => x.id === selectedEpisodeId.value)) return;
+  selectedEpisodeId.value = eps[0]?.id || "";
+  if (eps.length) {
+    const maxSeq = eps.reduce((m, x) => Math.max(m, x.seq || 0), 0);
+    episodeForm.seq = maxSeq + 1;
+    episodeForm.title = "";
+  } else {
+    episodeForm.seq = 1;
+    episodeForm.title = "";
   }
 }
 
@@ -417,19 +486,30 @@ async function refreshDetail() {
   detailLoading.value = true;
   try {
     detail.value = await getMediaAssetDetailApi(id);
+    syncDramaDetail(detail.value);
     await fetchList();
   } finally {
     detailLoading.value = false;
   }
 }
 
+function mediaWorkId() {
+  if (detail.value?.kind === 5) return selectedEpisodeId.value;
+  return detail.value?.id || "";
+}
+
 async function onFileChange(file: { raw?: File }) {
   const raw = file?.raw;
   if (!raw || !detail.value) return;
+  const targetId = mediaWorkId();
+  if (!targetId) {
+    ElMessage.warning("请先选择或新建一集");
+    return;
+  }
   uploading.value = true;
   uploadPercent.value = 0;
   try {
-    const { upload_url } = await getMediaUploadUrlApi(detail.value.id, raw.name);
+    const { upload_url } = await getMediaUploadUrlApi(targetId, raw.name);
     uploadPercent.value = 30;
     await putMediaFile(upload_url, raw);
     uploadPercent.value = 100;
@@ -459,13 +539,16 @@ async function onCoverChange(file: { raw?: File }) {
 
 async function onTranscode() {
   if (!detail.value) return;
-  if (!detail.value.source_key) {
+  const targetId = mediaWorkId();
+  const ep = (detail.value.episodes || []).find((x) => x.id === targetId);
+  const hasSource = detail.value.kind === 5 ? Boolean(ep?.source_key) : Boolean(detail.value.source_key);
+  if (!targetId || !hasSource) {
     ElMessage.warning("请先上传原片");
     return;
   }
   transcoding.value = true;
   try {
-    const res = await triggerMediaTranscodeApi(detail.value.id, {
+    const res = await triggerMediaTranscodeApi(targetId, {
       cover_seek_sec: coverSeekSec.value ?? 8,
     });
     ElMessage.success(`已投递转码 job_id=${res.job_id}，完成后请点「刷新状态」`);
@@ -476,9 +559,180 @@ async function onTranscode() {
 }
 
 function openPlay() {
-  if (detail.value?.play_url) {
-    window.open(detail.value.play_url, "_blank");
+  const url = playTargetUrl.value || detail.value?.play_url;
+  if (url) window.open(url, "_blank");
+}
+
+async function saveDrama() {
+  if (!detail.value || detail.value.kind !== 5) return;
+  if (!dramaEdit.title.trim()) {
+    ElMessage.warning("请填写标题");
+    return;
   }
+  savingDrama.value = true;
+  try {
+    await updateMediaAssetApi(detail.value.id, {
+      title: dramaEdit.title.trim(),
+      intro: dramaEdit.intro.trim(),
+      remark: dramaEdit.remark.trim(),
+      update_status: dramaEdit.update_status,
+    });
+    ElMessage.success("已保存");
+    await refreshDetail();
+  } finally {
+    savingDrama.value = false;
+  }
+}
+
+function onSelectEpisodeRow(row: MediaApi.DramaEpisode) {
+  selectedEpisodeId.value = row.id;
+}
+
+async function addEpisode() {
+  if (!detail.value) return;
+  if (episodeForm.seq < 1) {
+    ElMessage.warning("集号必须从 1 开始");
+    return;
+  }
+  addingEpisode.value = true;
+  try {
+    const res = await createMediaEpisodeApi(detail.value.id, {
+      seq: episodeForm.seq,
+      title: episodeForm.title.trim() || undefined,
+    });
+    selectedEpisodeId.value = res.id;
+    ElMessage.success(res.created ? "已新增剧集" : "该集号已存在，已打开原记录");
+    await refreshDetail();
+  } finally {
+    addingEpisode.value = false;
+  }
+}
+
+async function onDeleteEpisode(ep: MediaApi.DramaEpisode) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除「第${ep.seq}集 ${ep.title}」？将清理该集对象存储，且不可恢复。`,
+      "删除剧集",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  deleting.value = true;
+  try {
+    await deleteMediaAssetApi(ep.id);
+    if (selectedEpisodeId.value === ep.id) selectedEpisodeId.value = "";
+    ElMessage.success("已删除剧集");
+    await refreshDetail();
+  } finally {
+    deleting.value = false;
+  }
+}
+
+async function openDramaImport() {
+  dramaImportFile.value = null;
+  dramaImportGroups.value = [];
+  dramaImportError.value = "";
+  dramaImportResult.value = null;
+  dramaImportResume.value = true;
+  dramaImportConfirmed.value = false;
+  dramaImportVisible.value = true;
+  try {
+    dramaImportLimits.value = await getDramaImportLimitsApi();
+  } catch {
+    dramaImportLimits.value = {
+      max_zip_bytes: 2 * 1024 * 1024 * 1024,
+      max_extract_bytes: 4 * 1024 * 1024 * 1024,
+      max_files: 500,
+      max_file_bytes: 2 * 1024 * 1024 * 1024,
+      max_ratio: 100,
+      min_free_bytes: 1024 * 1024 * 1024,
+    };
+  }
+}
+
+async function onDramaZipChange(file: { raw?: File }) {
+  const raw = file?.raw;
+  dramaImportFile.value = raw || null;
+  dramaImportGroups.value = [];
+  dramaImportError.value = "";
+  dramaImportResult.value = null;
+  dramaImportConfirmed.value = false;
+  if (!raw) return;
+  const lim = dramaImportLimits.value;
+  if (lim && raw.size > lim.max_zip_bytes) {
+    dramaImportError.value = `压缩包大小 ${humanBytes(raw.size)} 超过上限 ${humanBytes(lim.max_zip_bytes)}`;
+    return;
+  }
+  try {
+    const entries = await listZipEntries(raw);
+    if (lim) {
+      const err = checkZipLimits(raw.size, entries, lim);
+      if (err) {
+        dramaImportError.value = err;
+        return;
+      }
+    }
+    dramaImportGroups.value = groupDramaZip(entries, raw.name);
+  } catch (e: any) {
+    dramaImportError.value = e?.message || "无法解析压缩包";
+  }
+}
+
+async function submitDramaImport() {
+  if (!dramaImportFile.value) {
+    ElMessage.warning("请选择 zip");
+    return;
+  }
+  if (dramaImportError.value) {
+    ElMessage.warning(dramaImportError.value);
+    return;
+  }
+  const needs = dramaImportGroups.value.some((g) => g.needsConfirm);
+  if (needs && !dramaImportConfirmed.value) {
+    ElMessage.warning("存在需确认项，请核对集号和封面后再勾选确认");
+    return;
+  }
+  for (const g of dramaImportGroups.value) {
+    if (!g.title.trim()) {
+      ElMessage.warning("短剧标题不能为空");
+      return;
+    }
+    const seen = new Set<number>();
+    for (const v of g.videos) {
+      if (!v.hasSeq || v.seq < 1) {
+        ElMessage.warning(`「${g.title}」还有未确认的集号`);
+        return;
+      }
+      if (seen.has(v.seq)) {
+        ElMessage.warning(`「${g.title}」集号 ${v.seq} 重复`);
+        return;
+      }
+      seen.add(v.seq);
+    }
+  }
+  dramaImporting.value = true;
+  try {
+    const data = await importDramaZipApi(dramaImportFile.value, {
+      resume: dramaImportResume.value,
+      plan: buildImportPlan(dramaImportGroups.value),
+      maxBytes: dramaImportLimits.value?.max_zip_bytes,
+    });
+    dramaImportResult.value = data;
+    ElMessage.success(`已导入 ${data.imported} 部短剧`);
+    pageTab.value = "drama";
+    searchForm.kind = 5;
+    pagination.current = 1;
+    await fetchList();
+  } catch (e: any) {
+    ElMessage.error(e?.message || "导入失败");
+  } finally {
+    dramaImporting.value = false;
+  }
+}
+
+function dramaCoverOptions(g: DramaZipGroup) {
+  return [{ path: "", name: "暂不设置" }, ...g.covers.map((c) => ({ path: c.path, name: c.name }))];
 }
 
 function syncNovelEdit() {
@@ -590,8 +844,12 @@ async function onDelete(row?: { id: string; title: string }) {
   const target = row ?? detail.value;
   if (!target) return;
   try {
+    const extra =
+      detail.value?.kind === 5 && detail.value.id === target.id
+        ? "将同时删除该短剧下全部剧集及对象存储，且不可恢复。"
+        : "将同时清理 MinIO 对象，且不可恢复。";
     await ElMessageBox.confirm(
-      `确认删除「${target.title}」？将同时清理 MinIO 对象，且不可恢复。`,
+      `确认删除「${target.title}」？${extra}`,
       "删除媒资",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -600,7 +858,7 @@ async function onDelete(row?: { id: string; title: string }) {
   }
   deleting.value = true;
   try {
-    const res = await deleteMediaAssetApi(target.id);
+    await deleteMediaAssetApi(target.id);
     ElMessage.success("删除成功");
     if (detail.value?.id === target.id) {
       destroyPlayer();
@@ -660,6 +918,14 @@ onMounted(() => {
           >
             批量上传小说
           </ElButton>
+          <template v-else-if="pane.kind === 5">
+            <ElButton :disabled="!configured" @click="openDramaImport">
+              批量上传短剧
+            </ElButton>
+            <ElButton type="primary" :disabled="!configured" @click="openCreate">
+              新建短剧
+            </ElButton>
+          </template>
           <ElButton
             v-else
             type="primary"
@@ -717,12 +983,12 @@ onMounted(() => {
           </template>
         </ElTableColumn>
         <ElTableColumn
-          v-if="isChapterKind(pane.kind)"
-          label="章节"
+          v-if="isSeriesListKind(pane.kind)"
+          :label="pane.kind === 5 ? '集数' : '章节'"
           width="90"
         >
           <template #default="{ row }">
-            {{ row.chapter_count || 0 }} 章
+            {{ row.chapter_count || 0 }} {{ pane.kind === 5 ? "集" : "章" }}
           </template>
         </ElTableColumn>
         <ElTableColumn
@@ -735,12 +1001,12 @@ onMounted(() => {
           </template>
         </ElTableColumn>
         <ElTableColumn
-          v-if="!isChapterKind(pane.kind)"
+          v-if="!isSeriesListKind(pane.kind)"
           prop="transcode_status"
           label="转码"
           width="110"
         />
-        <ElTableColumn v-if="!isChapterKind(pane.kind)" label="时长" width="90">
+        <ElTableColumn v-if="!isSeriesListKind(pane.kind)" label="时长" width="90">
           <template #default="{ row }">
             {{ formatDuration(row.duration_sec) }}
           </template>
@@ -793,11 +1059,23 @@ onMounted(() => {
             :placeholder="paneTitlePlaceholder(currentPane.kind)"
           />
         </ElFormItem>
+        <ElFormItem v-if="currentPane.kind === 5" label="简介">
+          <ElInput v-model="createForm.intro" type="textarea" :rows="3" />
+        </ElFormItem>
+        <ElFormItem v-if="currentPane.kind === 5" label="更新">
+          <ElRadioGroup v-model="createForm.update_status">
+            <ElRadioButton :value="1">连载</ElRadioButton>
+            <ElRadioButton :value="2">完结</ElRadioButton>
+          </ElRadioGroup>
+        </ElFormItem>
         <ElFormItem label="备注">
           <ElInput v-model="createForm.remark" type="textarea" :rows="2" />
         </ElFormItem>
-        <p class="mb-0 pl-[80px] text-xs text-gray-400">
+        <p v-if="currentPane.kind !== 5" class="mb-0 pl-[80px] text-xs text-gray-400">
           封面由转码自动截取，无需手动填写
+        </p>
+        <p v-else class="mb-0 pl-[80px] text-xs text-gray-400">
+          主封面请在详情里上传；也可使用「批量上传短剧」按目录打包导入
         </p>
       </ElForm>
       <template #footer>
@@ -928,11 +1206,97 @@ onMounted(() => {
       </template>
     </ElDialog>
 
+
+    <ElDialog v-model="dramaImportVisible" title="批量上传短剧" width="860px" destroy-on-close>
+      <p class="mb-3 text-sm leading-relaxed text-gray-600">
+        先在本地把短剧目录打成 zip 再上传（不要把多部剧的视频摊在压缩包根目录以外的零散位置）。
+        目录名即剧名，目录内放各集视频和一张封面；支持一次打包多部。
+        压缩包上限
+        {{ dramaImportLimits ? humanBytes(dramaImportLimits.max_zip_bytes) : "2GB" }}
+        ，需同时不超过服务端请求体限制。ZIP 通常不会明显减小视频体积。
+      </p>
+      <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">剧名或父目录/
+  剧名/
+    剧名_第01集.mp4
+    剧名_第02集.mp4
+    cover.jpg                 也可以是采集得到的单张 jpeg
+  另一部剧/
+    另一部剧_第01集.mp4</pre>
+      <ElUpload :auto-upload="false" :limit="1" accept=".zip,application/zip" :on-change="onDramaZipChange">
+        <ElButton>选择 zip</ElButton>
+      </ElUpload>
+      <p v-if="dramaImportError" class="mt-3 text-sm text-red-500">{{ dramaImportError }}</p>
+      <div v-if="dramaImportGroups.length" class="mt-4 space-y-4">
+        <div v-for="(g, gi) in dramaImportGroups" :key="gi" class="rounded border p-3">
+          <div class="mb-2 flex flex-wrap items-center gap-2">
+            <span class="text-sm text-gray-500">剧名</span>
+            <ElInput v-model="g.title" class="!w-72" />
+            <span class="text-sm text-gray-500">封面</span>
+            <ElSelect v-model="g.coverPath" clearable placeholder="请选择" class="!w-56">
+              <ElOption
+                v-for="opt in dramaCoverOptions(g)"
+                :key="opt.path || 'none'"
+                :label="opt.name"
+                :value="opt.path"
+              />
+            </ElSelect>
+          </div>
+          <ul v-if="g.warnings.length" class="mb-2 list-disc pl-5 text-xs text-amber-600">
+            <li v-for="(w, wi) in g.warnings" :key="wi">{{ w }}</li>
+          </ul>
+          <ElTable :data="g.videos" size="small" border>
+            <ElTableColumn label="集号" width="110">
+              <template #default="{ row }">
+                <ElInputNumber v-model="row.seq" :min="1" size="small" controls-position="right" class="!w-24" @change="row.hasSeq = row.seq >= 1" />
+              </template>
+            </ElTableColumn>
+            <ElTableColumn prop="name" label="文件" min-width="220" show-overflow-tooltip />
+            <ElTableColumn label="大小" width="100">
+              <template #default="{ row }">{{ humanBytes(row.size) }}</template>
+            </ElTableColumn>
+          </ElTable>
+        </div>
+      </div>
+      <div class="mt-3 flex items-center gap-2">
+        <span class="text-sm text-gray-700">续传</span>
+        <ElSwitch v-model="dramaImportResume" />
+        <span class="text-xs text-gray-400">开启后同名短剧追加未入库集数，已有集号跳过</span>
+      </div>
+      <div class="mt-2 flex items-center gap-2">
+        <ElSwitch v-model="dramaImportConfirmed" />
+        <span class="text-sm text-gray-700">已核对集号、封面，确认导入</span>
+      </div>
+      <div v-if="dramaImportResult" class="mt-4 text-sm">
+        <p>
+          成功 {{ dramaImportResult.imported }} 部
+          <span v-if="dramaImportResult.failed_count">，失败 {{ dramaImportResult.failed_count }}</span>
+        </p>
+        <ul v-if="dramaImportResult.list?.length" class="mt-2 list-disc pl-5">
+          <li v-for="item in dramaImportResult.list" :key="item.id">
+            {{ item.title }} · {{ item.chapter_count }} 集
+            <span v-if="item.appended"> · 续传</span>
+            <span v-if="item.skipped_count"> · 跳过 {{ item.skipped_count }} 集</span>
+          </li>
+        </ul>
+        <ul v-if="dramaImportResult.failed?.length" class="mt-2 list-disc pl-5 text-red-500">
+          <li v-for="(item, i) in dramaImportResult.failed" :key="i">
+            {{ item.title }}：{{ item.error }}
+          </li>
+        </ul>
+      </div>
+      <template #footer>
+        <ElButton @click="dramaImportVisible = false">关闭</ElButton>
+        <ElButton type="primary" :loading="dramaImporting" :disabled="!!dramaImportError || !dramaImportFile" @click="submitDramaImport">
+          开始导入
+        </ElButton>
+      </template>
+    </ElDialog>
+
     <!-- 详情弹窗 + 预览 -->
     <ElDialog
       v-model="detailVisible"
       title="媒资详情"
-      :width="isChapterKind(detail?.kind || 0) ? '1080px' : '880px'"
+      :width="isSeriesListKind(detail?.kind || 0) ? '1080px' : '880px'"
       top="6vh"
       destroy-on-close
       align-center
@@ -1187,6 +1551,148 @@ onMounted(() => {
             <ElButton type="danger" plain :loading="deleting" @click="onDelete">
               删除小说
             </ElButton>
+          </template>
+          <template v-else-if="detail.kind === 5">
+            <div class="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div class="sm:col-span-2 flex flex-wrap items-start gap-4">
+                <ElImage
+                  v-if="detail.cover_url"
+                  :src="detail.cover_url"
+                  :preview-src-list="[detail.cover_url]"
+                  fit="contain"
+                  preview-teleported
+                  class="h-40 w-28 rounded border bg-gray-50"
+                />
+                <div class="min-w-[220px]">
+                  <div class="mb-2 text-sm text-gray-500">主封面</div>
+                  <ElUpload
+                    :auto-upload="false"
+                    :show-file-list="false"
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    :disabled="replacingCover"
+                    :on-change="onCoverChange"
+                  >
+                    <ElButton size="small" :loading="replacingCover">
+                      选择图片并替换
+                    </ElButton>
+                  </ElUpload>
+                </div>
+              </div>
+              <ElFormItem label="标题">
+                <ElInput v-model="dramaEdit.title" />
+              </ElFormItem>
+              <ElFormItem label="更新">
+                <ElRadioGroup v-model="dramaEdit.update_status">
+                  <ElRadioButton :value="1">连载</ElRadioButton>
+                  <ElRadioButton :value="2">完结</ElRadioButton>
+                </ElRadioGroup>
+              </ElFormItem>
+              <div class="sm:col-span-2">
+                <div class="mb-1 text-sm text-gray-500">简介</div>
+                <ElInput v-model="dramaEdit.intro" type="textarea" :rows="3" />
+              </div>
+              <div class="sm:col-span-2">
+                <div class="mb-1 text-sm text-gray-500">备注</div>
+                <ElInput v-model="dramaEdit.remark" type="textarea" :rows="2" />
+              </div>
+            </div>
+            <div class="mb-4 flex flex-wrap gap-2">
+              <ElButton type="primary" :loading="savingDrama" @click="saveDrama">
+                保存资料
+              </ElButton>
+              <ElButton @click="refreshDetail">刷新状态</ElButton>
+              <ElButton type="danger" plain :loading="deleting" @click="onDelete()">
+                删除短剧（含全部剧集和对象）
+              </ElButton>
+            </div>
+
+            <div class="mb-2 text-sm font-medium">剧集</div>
+            <div class="mb-3 flex flex-wrap items-end gap-2">
+              <span class="text-sm text-gray-500">集号</span>
+              <ElInputNumber v-model="episodeForm.seq" :min="1" controls-position="right" class="!w-28" />
+              <ElInput v-model="episodeForm.title" placeholder="可选标题，默认第N集" class="!w-48" />
+              <ElButton type="primary" plain :loading="addingEpisode" @click="addEpisode">
+                新增剧集
+              </ElButton>
+            </div>
+            <ElTable
+              :data="detail.episodes || []"
+              stripe
+              border
+              highlight-current-row
+              class="mb-4"
+              @row-click="onSelectEpisodeRow"
+            >
+              <ElTableColumn prop="seq" label="集号" width="80" />
+              <ElTableColumn prop="title" label="标题" min-width="140" show-overflow-tooltip />
+              <ElTableColumn label="状态" width="100">
+                <template #default="{ row }">
+                  <ElTag :type="statusMeta[row.status]?.type || 'info'" size="small">
+                    {{ statusMeta[row.status]?.label || row.status }}
+                  </ElTag>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn prop="transcode_status" label="转码" width="100" />
+              <ElTableColumn label="时长" width="80">
+                <template #default="{ row }">
+                  {{ formatDuration(row.duration_sec) }}
+                </template>
+              </ElTableColumn>
+              <ElTableColumn label="操作" width="120" fixed="right">
+                <template #default="{ row }">
+                  <ElButton link type="primary" @click.stop="selectedEpisodeId = row.id">
+                    选择
+                  </ElButton>
+                  <ElButton link type="danger" @click.stop="onDeleteEpisode(row)">
+                    删除
+                  </ElButton>
+                </template>
+              </ElTableColumn>
+            </ElTable>
+
+            <template v-if="selectedEpisodeId">
+              <div class="mb-3 text-sm font-medium">
+                当前剧集：第{{ (detail.episodes || []).find((x) => x.id === selectedEpisodeId)?.seq }}集
+              </div>
+              <div class="mb-4 overflow-hidden rounded-md bg-black">
+                <video
+                  v-if="playTargetUrl"
+                  ref="videoRef"
+                  class="max-h-[360px] w-full"
+                  controls
+                  playsinline
+                  preload="metadata"
+                />
+                <div v-else class="flex h-40 items-center justify-center text-sm text-gray-400">
+                  暂无播放地址（上传并转码完成后可预览）
+                </div>
+              </div>
+              <p v-if="playerError" class="mb-3 text-xs text-red-500">{{ playerError }}</p>
+              <div class="mb-3 text-sm font-medium">1. 上传原片</div>
+              <ElUpload
+                :auto-upload="false"
+                :show-file-list="false"
+                accept="video/*,.mp4,.mov,.mkv"
+                :disabled="uploading"
+                :on-change="onFileChange"
+              >
+                <ElButton type="primary" plain :loading="uploading">选择视频并上传</ElButton>
+              </ElUpload>
+              <div v-if="uploading" class="mt-2 text-xs text-gray-500">上传中… {{ uploadPercent }}%</div>
+              <div class="mb-3 mt-6 text-sm font-medium">2. 触发转码</div>
+              <div class="mb-3 flex flex-wrap items-center gap-2 text-sm">
+                <span class="text-gray-500">封面截取秒数</span>
+                <ElInputNumber v-model="coverSeekSec" :min="0" :max="36000" :step="1" controls-position="right" class="!w-36" />
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <ElButton type="primary" :loading="transcoding" @click="onTranscode">开始转码（HLS）</ElButton>
+                <ElButton :disabled="!playTargetUrl" @click="openPlay">打开播放地址</ElButton>
+                <ElButton @click="refreshDetail">刷新状态</ElButton>
+              </div>
+            </template>
+            <p class="mt-4 text-xs leading-relaxed text-gray-400">
+              原片和 HLS 写入 MinIO drama/ 前缀。整部不转码。批量入库请打 zip：目录名即剧名，内含各集视频和一张封面。
+            </p>
           </template>
           <template v-else>
           <div class="mb-4 overflow-hidden rounded-md bg-black">
