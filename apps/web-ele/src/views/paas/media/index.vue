@@ -65,6 +65,7 @@ import {
   checkZipLimits,
   groupDramaZip,
   humanBytes,
+  defaultDramaImportLimits,
   listZipEntries,
   type DramaImportLimits,
   type DramaZipGroup,
@@ -640,14 +641,7 @@ async function openDramaImport() {
   try {
     dramaImportLimits.value = await getDramaImportLimitsApi();
   } catch {
-    dramaImportLimits.value = {
-      max_zip_bytes: 2 * 1024 * 1024 * 1024,
-      max_extract_bytes: 4 * 1024 * 1024 * 1024,
-      max_files: 500,
-      max_file_bytes: 2 * 1024 * 1024 * 1024,
-      max_ratio: 100,
-      min_free_bytes: 1024 * 1024 * 1024,
-    };
+    dramaImportLimits.value = { ...defaultDramaImportLimits };
   }
 }
 
@@ -660,6 +654,10 @@ async function onDramaZipChange(file: { raw?: File }) {
   dramaImportConfirmed.value = false;
   if (!raw) return;
   const lim = dramaImportLimits.value;
+  if (lim && lim.max_body_bytes && raw.size > lim.max_body_bytes) {
+    dramaImportError.value = `压缩包大小 ${humanBytes(raw.size)} 超过请求体上限 ${humanBytes(lim.max_body_bytes)}`;
+    return;
+  }
   if (lim && raw.size > lim.max_zip_bytes) {
     dramaImportError.value = `压缩包大小 ${humanBytes(raw.size)} 超过上限 ${humanBytes(lim.max_zip_bytes)}`;
     return;
@@ -717,6 +715,8 @@ async function submitDramaImport() {
       resume: dramaImportResume.value,
       plan: buildImportPlan(dramaImportGroups.value),
       maxBytes: dramaImportLimits.value?.max_zip_bytes,
+      maxBodyBytes: dramaImportLimits.value?.max_body_bytes,
+      timeoutSec: dramaImportLimits.value?.import_timeout_sec,
     });
     dramaImportResult.value = data;
     ElMessage.success(`已导入 ${data.imported} 部短剧`);
@@ -1212,8 +1212,13 @@ onMounted(() => {
         先在本地把短剧目录打成 zip 再上传（不要把多部剧的视频摊在压缩包根目录以外的零散位置）。
         目录名即剧名，目录内放各集视频和一张封面；支持一次打包多部。
         压缩包上限
-        {{ dramaImportLimits ? humanBytes(dramaImportLimits.max_zip_bytes) : "2GB" }}
-        ，需同时不超过服务端请求体限制。ZIP 通常不会明显减小视频体积。
+        {{ humanBytes((dramaImportLimits || defaultDramaImportLimits).max_zip_bytes) }}
+        ，请求体上限
+        {{ humanBytes((dramaImportLimits || defaultDramaImportLimits).max_body_bytes || 100000000) }}
+        （含表单余量）。公网经 Cloudflare 免费/Pro 单请求约 100MB，只调大集群 Ingress 不能传到 2GB。
+        导入须在
+        {{ Math.round(((dramaImportLimits || defaultDramaImportLimits).import_timeout_sec || 600) / 60) }}
+        分钟内完成，超时会失败。ZIP 通常不会明显减小视频体积。
       </p>
       <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">剧名或父目录/
   剧名/

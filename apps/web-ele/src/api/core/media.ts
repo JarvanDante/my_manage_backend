@@ -114,11 +114,13 @@ export namespace MediaApi {
 
   export interface DramaImportLimits {
     max_zip_bytes: number;
+    max_body_bytes?: number;
     max_extract_bytes: number;
     max_files: number;
     max_file_bytes: number;
     max_ratio: number;
     min_free_bytes: number;
+    import_timeout_sec?: number;
   }
 
   export interface ImportDramasData {
@@ -371,13 +373,30 @@ export async function importNovelZipApi(file: File, resume = false) {
   return json.data;
 }
 
+function formatBytesShort(n: number) {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
+}
+
 export async function importDramaZipApi(
   file: File,
-  opts: { resume?: boolean; plan?: unknown; maxBytes?: number },
+  opts: {
+    resume?: boolean;
+    plan?: unknown;
+    maxBytes?: number;
+    maxBodyBytes?: number;
+    timeoutSec?: number;
+  },
 ) {
-  const maxBytes = opts.maxBytes ?? 2 * 1024 * 1024 * 1024;
+  const maxBytes = opts.maxBytes ?? 96_000_000;
+  const maxBody = opts.maxBodyBytes ?? 100_000_000;
   if (file.size > maxBytes) {
-    throw new Error(`压缩包不能超过 ${Math.round(maxBytes / 1024 / 1024 / 1024)}GB`);
+    throw new Error(`压缩包不能超过 ${formatBytesShort(maxBytes)}`);
+  }
+  if (maxBody > 0 && file.size > maxBody) {
+    throw new Error(`压缩包不能超过请求体上限 ${formatBytesShort(maxBody)}`);
   }
   const fd = new FormData();
   fd.append("file", file);
@@ -385,23 +404,45 @@ export async function importDramaZipApi(
   if (opts.plan) {
     fd.append("plan", JSON.stringify(opts.plan));
   }
-  const res = await fetch(`${mediaBaseURL}/admin/dramas/import`, {
-    method: "POST",
-    headers: { "X-Admin-Token": mediaAdminToken },
-    body: fd,
-  });
+  const timeoutSec = opts.timeoutSec && opts.timeoutSec > 0 ? opts.timeoutSec : 600;
+  const ac = new AbortController();
+  const timer = window.setTimeout(() => ac.abort(), timeoutSec * 1000);
+  let res: Response;
+  try {
+    res = await fetch(`${mediaBaseURL}/admin/dramas/import`, {
+      method: "POST",
+      headers: { "X-Admin-Token": mediaAdminToken },
+      body: fd,
+      signal: ac.signal,
+    });
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(`导入超时（超过 ${timeoutSec} 秒），请缩小压缩包后重试`);
+    }
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
+  }
   const text = await res.text();
   let json: {
     code: number;
     message?: string;
     data: MediaApi.ImportDramasData;
   };
+  const tooLarge =
+    res.status === 413 ||
+    /body too large|ParseMultipartForm|entity too large|request entity too large/i.test(text);
+  if (tooLarge) {
+    throw new Error(
+      `上传被拒绝：请求体超过允许上限（压缩包 ${formatBytesShort(maxBytes)}，请求体 ${formatBytesShort(maxBody)}）。请缩小压缩包后重试。`,
+    );
+  }
+  if (res.status === 504 || res.status === 408 || /timeout/i.test(text || "")) {
+    throw new Error(`导入超时（超过 ${timeoutSec} 秒），请缩小压缩包后重试`);
+  }
   try {
     json = JSON.parse(text);
   } catch {
-    if (/body too large|ParseMultipartForm/i.test(text)) {
-      throw new Error("压缩包太大，超过服务器请求体上限");
-    }
     throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
   }
   if (!res.ok || json.code !== 0) {

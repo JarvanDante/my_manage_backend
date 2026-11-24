@@ -29,12 +29,26 @@ export interface DramaZipGroup {
 
 export interface DramaImportLimits {
   max_zip_bytes: number;
+  max_body_bytes?: number;
   max_extract_bytes: number;
   max_files: number;
   max_file_bytes: number;
   max_ratio: number;
   min_free_bytes: number;
+  import_timeout_sec?: number;
 }
+
+/** 与后端默认一致：公网 Cloudflare 免费/Pro 约 100MB 请求体，zip 预留表单余量。 */
+export const defaultDramaImportLimits: DramaImportLimits = {
+  max_zip_bytes: 96_000_000,
+  max_body_bytes: 100_000_000,
+  max_extract_bytes: 192_000_000,
+  max_files: 500,
+  max_file_bytes: 96_000_000,
+  max_ratio: 100,
+  min_free_bytes: 1024 * 1024 * 1024,
+  import_timeout_sec: 600,
+};
 
 const reHua = /第\s*0*(\d+)\s*[集话章回話]/;
 const reEp = /(?:^|[_\-.\s])(?:ep|e|episode|sp)?\s*0*(\d+)(?:\s*[集话章回]|\s*$|\.)/i;
@@ -82,8 +96,13 @@ export function parseEpisodeSeq(filename: string): { seq: number; ok: boolean } 
 }
 
 export function checkZipLimits(zipSize: number, files: ZipEntryMeta[], lim: DramaImportLimits) {
-  if (zipSize > lim.max_zip_bytes) {
-    return `压缩包大小 ${humanBytes(zipSize)} 超过上限 ${humanBytes(lim.max_zip_bytes)}`;
+  const zipCap = lim.max_zip_bytes;
+  const bodyCap = lim.max_body_bytes || 0;
+  if (bodyCap > 0 && zipSize > bodyCap) {
+    return `压缩包大小 ${humanBytes(zipSize)} 超过请求体上限 ${humanBytes(bodyCap)}`;
+  }
+  if (zipSize > zipCap) {
+    return `压缩包大小 ${humanBytes(zipSize)} 超过上限 ${humanBytes(zipCap)}`;
   }
   let extract = 0;
   let count = 0;
