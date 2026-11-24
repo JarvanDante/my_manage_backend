@@ -652,7 +652,12 @@ function dramaJobStatusText(job: MediaApi.DramaImportJob | null) {
     return `入库完成（不等于全部转码完成）。转码就绪 ${job.episode_ready}/${job.episode_total}，处理中 ${job.episode_processing}，失败 ${job.episode_failed}`;
   }
   if (job.status === "succeeded") return `全部 ${job.episode_total} 集已转码完成`;
-  if (job.status === "failed") return job.error || job.message || "导入失败";
+  if (job.status === "failed") {
+    if (job.imported && job.failed_count) {
+      return job.error || job.message || `部分入库失败（成功 ${job.imported}，失败 ${job.failed_count}），整包已保留可重试`;
+    }
+    return job.error || job.message || "导入失败";
+  }
   if (job.status === "canceled") return "任务已取消";
   return job.message || job.status;
 }
