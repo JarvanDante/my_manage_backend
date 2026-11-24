@@ -62,24 +62,49 @@ const reHua = /第\s*0*(\d+)\s*[集话章回話]/;
 const reEp = /(?:^|[_\-.\s])(?:ep|e|episode|sp)?\s*0*(\d+)(?:\s*[集话章回]|\s*$|\.)/i;
 
 export function shouldIgnoreZipName(name: string) {
-  const n = name.replaceAll("\\", "/").trim();
+  const n = name.replaceAll("\\", "/");
+  // 只统一分隔符，不 trim：前导/尾部空白是路径身份的一部分。
   if (!n || n.endsWith("/")) return true;
   const base = n.split("/").pop() || "";
   if (base === ".DS_Store" || base === "Thumbs.db" || base === "desktop.ini") return true;
   if (base.startsWith("._") || base.startsWith("~$")) return true;
   const low = base.toLowerCase();
   if (low.endsWith(".tmp") || low.endsWith(".temp")) return true;
-  return n.split("/").some((part) => part === "__MACOSX" || (part && part.startsWith(".")));
+  return n.split("/").some((part) => part === "__MACOSX" || (!!part && part.startsWith(".")));
 }
 
 export function sanitizeZipEntryName(name: string) {
-  const raw = name.trim();
-  if (!raw || raw.includes("\0")) throw new Error("非法路径");
-  const n = raw.replaceAll("\\", "/");
-  if (n.startsWith("/") || /^[a-zA-Z]:/.test(n)) throw new Error(`拒绝绝对路径: ${raw}`);
-  const parts = n.split("/").filter((p) => p && p !== ".");
-  if (parts.some((p) => p === "..")) throw new Error(`拒绝越出目录的路径: ${raw}`);
-  return parts.join("/");
+  if (name.includes("\0")) throw new Error("非法路径");
+  const n = name.replaceAll("\\", "/");
+  if (!n) throw new Error("空路径");
+  if (n.startsWith("/") || /^[a-zA-Z]:/.test(n)) throw new Error(`拒绝绝对路径: ${name}`);
+  const cleaned = posixCleanPath(n);
+  if (cleaned === ".." || cleaned.startsWith("../")) throw new Error(`拒绝越出目录的路径: ${name}`);
+  if (cleaned === "" || cleaned === "/") throw new Error("空路径");
+  // 点路径或多余分隔符折叠会改变身份，合桶前明确拒绝。
+  if (cleaned !== n) {
+    throw new Error(`路径含有会混淆的点路径或多余分隔符，拒绝规范化合并`);
+  }
+  return n;
+}
+
+/** 与 Go path.Clean 对齐的词法清理，仅用于安全校验与歧义检测，不作为最终身份（折叠则拒绝）。 */
+function posixCleanPath(n: string): string {
+  const abs = n.startsWith("/");
+  const out: string[] = [];
+  for (const p of n.split("/")) {
+    if (p === "" || p === ".") continue;
+    if (p === "..") {
+      if (out.length && out[out.length - 1] !== "..") out.pop();
+      else if (!abs) out.push("..");
+      continue;
+    }
+    out.push(p);
+  }
+  let s = out.join("/");
+  if (abs) s = `/${s}`;
+  if (s === "") s = abs ? "/" : ".";
+  return s;
 }
 
 export function parseEpisodeSeq(filename: string): { seq: number; ok: boolean } {
@@ -196,7 +221,8 @@ export function groupDramaZip(files: ZipEntryMeta[], zipBase: string): DramaZipG
 
 function extOf(p: string) {
   const i = p.lastIndexOf(".");
-  return i >= 0 ? p.slice(i).toLowerCase() : "";
+  // 仅扩展名分类去空白；完整 path 身份保留文件名首尾空白。
+  return i >= 0 ? p.slice(i).toLowerCase().trim() : "";
 }
 function baseOf(p: string) {
   return p.split("/").pop() || p;
@@ -232,10 +258,16 @@ function dramaGroupKey(rel: string, parent: string): string {
 function groupTitle(key: string, zipBase: string) {
   if (key === ".") {
     const t = zipBase.replace(/\.zip$/i, "");
-    return t || "未命名短剧";
+    return displayDramaTitle(t || "未命名短剧");
   }
   const i = key.indexOf("/");
-  return i >= 0 ? key.slice(i + 1) : key;
+  return displayDramaTitle(i >= 0 ? key.slice(i + 1) : key);
+}
+
+/** 仅展示标题可去掉首尾空白；计划中的 path/cover 不得使用。 */
+function displayDramaTitle(s: string) {
+  const t = s.trim();
+  return t || s;
 }
 
 function finalizeGroup(g: DramaZipGroup) {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildImportPlan,
   checkZipLimits,
   groupDramaZip,
   parseEpisodeSeq,
@@ -93,5 +94,84 @@ describe("safety", () => {
     };
     expect(checkZipLimits(101, [], lim)).toContain("超过上限");
     expect(checkZipLimits(10, [{ name: "a.mp4", compressedSize: 1, uncompressedSize: 51 }], lim)).toContain("单文件");
+  });
+});
+
+describe("lossless path identity", () => {
+  it("does not trim leading or trailing spaces in sanitize or plan paths", () => {
+    const keep = [
+      "剧名/01.mp4",
+      " 剧名/01.mp4",
+      "剧名 /01.mp4",
+      "剧名/01.mp4 ",
+      "\u00a0剧名/01.mp4",
+      "\u3000剧名/01.mp4",
+      "pack/ 剧名/01.mp4",
+      "剧名/ 01.mp4",
+    ];
+    for (const name of keep) {
+      expect(sanitizeZipEntryName(name)).toBe(name.replaceAll("\\", "/"));
+    }
+    expect(sanitizeZipEntryName("剧A\\01.mp4")).toBe("剧A/01.mp4");
+    expect(() => sanitizeZipEntryName("a/./b/01.mp4")).toThrow();
+    expect(() => sanitizeZipEntryName("a//b/01.mp4")).toThrow();
+    expect(() => sanitizeZipEntryName("foo/../bar/01.mp4")).toThrow();
+    expect(() => sanitizeZipEntryName("./x.mp4")).toThrow();
+
+    const groups = groupDramaZip(
+      [
+        { name: "剧名/01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: " 剧名/01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: "剧名 /01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: "\u00a0剧名/01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: "\u3000剧名/01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: " 剧名/cover.jpg", compressedSize: 1, uncompressedSize: 1 },
+        { name: "剧名/01.mp4 ", compressedSize: 1, uncompressedSize: 1 },
+        { name: "剧名/ 02.mp4", compressedSize: 1, uncompressedSize: 1 },
+      ],
+      "pack.zip",
+    );
+    expect(groups).toHaveLength(5);
+    const titles = groups.map((g) => g.title);
+    expect(titles.every((t) => t === "剧名")).toBe(true);
+    const paths = groups.flatMap((g) => g.videos.map((v) => v.path));
+    expect(paths).toEqual(expect.arrayContaining([
+      "剧名/01.mp4",
+      " 剧名/01.mp4",
+      "剧名 /01.mp4",
+      "\u00a0剧名/01.mp4",
+      "\u3000剧名/01.mp4",
+      "剧名/01.mp4 ",
+      "剧名/ 02.mp4",
+    ]));
+    const base = groups.find((g) => g.videos.some((v) => v.path === "剧名/01.mp4"));
+    expect(base?.videos.map((v) => v.path)).toEqual(expect.arrayContaining(["剧名/01.mp4", "剧名/01.mp4 ", "剧名/ 02.mp4"]));
+
+    const plan = buildImportPlan(groups);
+    const planPaths = plan.items.flatMap((it) => [it.cover, ...it.episodes.map((e) => e.path)]).filter(Boolean);
+    expect(planPaths).toEqual(expect.arrayContaining([
+      " 剧名/01.mp4",
+      " 剧名/cover.jpg",
+      "剧名 /01.mp4",
+      "剧名/01.mp4 ",
+    ]));
+    expect(planPaths.some((p) => p === "剧名/01.mp4" ? false : p.trim() === "剧名/01.mp4" && p !== "剧名/01.mp4")).toBe(true);
+  });
+
+  it("keeps root files and same-name dirs distinct where grouping requires", () => {
+    const mixed = groupDramaZip(
+      [
+        { name: "01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: " 01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: "pack/剧名/01.mp4", compressedSize: 1, uncompressedSize: 1 },
+        { name: "other/剧名/01.mp4", compressedSize: 1, uncompressedSize: 1 },
+      ],
+      "pack.zip",
+    );
+    const root = mixed.filter((g) => g.videos.some((v) => v.path === "01.mp4"));
+    expect(root).toHaveLength(1);
+    expect(root[0]?.videos.map((v) => v.path)).toEqual(expect.arrayContaining(["01.mp4", " 01.mp4"]));
+    expect(mixed.some((g) => g.videos.some((v) => v.path === "pack/剧名/01.mp4"))).toBe(true);
+    expect(mixed.some((g) => g.videos.some((v) => v.path === "other/剧名/01.mp4"))).toBe(true);
   });
 });
