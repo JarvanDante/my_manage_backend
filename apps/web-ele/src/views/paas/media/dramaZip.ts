@@ -513,6 +513,41 @@ function readZip64Extra(
   return {};
 }
 
+/** 本地文件头固定部分长度，用于校验偏移至少能放下合法本地头。 */
+const LOCAL_HEADER_MIN = 30;
+
+/**
+ * 单条中央目录记录的预览字节预算，按 2000 条短剧路径的合理大小而不是 APPNOTE 理论最大值
+ *（46 + 3*65535 ≈ 196KiB/条，16000 条可到约 3.15GiB）。
+ */
+export const ZIP_CD_RECORD_BUDGET = 46 + 4096 + 1024 + 256; // 5422
+/** 相对 max_files 的条目余量系数，容纳 __MACOSX 等可忽略项。 */
+export const ZIP_CD_ENTRY_SLACK_FACTOR = 2;
+export const ZIP_CD_ENTRY_SLACK_EXTRA = 256;
+
+export function zipCdEntryCap(maxFiles = defaultDramaImportLimits.max_files): number {
+  const n = maxFiles > 0 ? maxFiles : defaultDramaImportLimits.max_files;
+  return n * ZIP_CD_ENTRY_SLACK_FACTOR + ZIP_CD_ENTRY_SLACK_EXTRA;
+}
+
+export function zipCdByteBudget(maxFiles = defaultDramaImportLimits.max_files): number {
+  return zipCdEntryCap(maxFiles) * ZIP_CD_RECORD_BUDGET;
+}
+
+function assertLocalHeaderOffset(localOffset: bigint, cdOffset: bigint, fileSize: bigint, name: string) {
+  if (localOffset > MAX_SAFE) {
+    throw new Error(`文件 ${name} 的本地头偏移超出可安全处理的整数范围`);
+  }
+  if (localOffset + BigInt(LOCAL_HEADER_MIN) > fileSize) {
+    throw new Error(`文件 ${name} 的本地头偏移超出文件范围`);
+  }
+  // 标准与常见变体（自解压前缀、数据描述符）仍是本地头在中央目录之前；
+  // 只要求 30 字节固定头完整落在 CD 之前，不读取本地头内容。
+  if (localOffset + BigInt(LOCAL_HEADER_MIN) > cdOffset) {
+    throw new Error(`文件 ${name} 的本地头位于中央目录内或之后，偏移无效`);
+  }
+}
+
 /**
  * 列出 zip 中央目录项。只切片 EOCD/ZIP64 记录与中央目录，不把整包读进内存。
  * 传统 32 位 zip 与单磁盘 ZIP64（含强制 ZIP64 小包）均可；加密与分卷明确拒绝。
@@ -582,10 +617,14 @@ export async function listZipEntries(
   }
 
   const maxFiles = lim.max_files > 0 ? lim.max_files : defaultDramaImportLimits.max_files;
-  // 计入可忽略项的上限，避免按恶意条目数把巨型中央目录读进内存。
-  const entryCap = Math.max(maxFiles * 8, maxFiles);
+  const entryCap = zipCdEntryCap(maxFiles);
+  const cdBudget = zipCdByteBudget(maxFiles);
+  // 条目数与目录字节预算在读取中央目录之前独立检查，不能等 arrayBuffer 后再计数。
   if (entriesTotal > BigInt(entryCap)) {
     throw new Error(`压缩包文件数超过上限 ${maxFiles}`);
+  }
+  if (cdSize > BigInt(cdBudget)) {
+    throw new Error(`中央目录过大，超出预览资源限制（上限 ${cdBudget} 字节）`);
   }
   if (entriesTotal > 0n) {
     const minCd = entriesTotal * 46n;
@@ -636,6 +675,7 @@ export async function listZipEntries(
     if (diskStart !== 0) throw new Error("不支持分卷或多磁盘 zip");
     const nameBytes = new Uint8Array(cdBuf, p + 46, nameLen);
     const name = decoder.decode(nameBytes);
+    assertLocalHeaderOffset(localOffset, cdOffset, fileSize, name);
     out.push({
       name,
       compressedSize: safeNumber(compressed, `文件 ${name} 的压缩大小`),
