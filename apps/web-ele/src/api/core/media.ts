@@ -495,13 +495,20 @@ export function getDramaUploadApi(id: string) {
   return mediaClient.get<MediaApi.DramaUploadSession>(`/admin/dramas/uploads/${id}`);
 }
 
-export function completeDramaUploadApi(
+export async function completeDramaUploadApi(
   id: string,
   body: { plan?: unknown; target_id?: string },
+  timeoutSec = 600,
 ) {
-  return mediaClient.post<{ upload_id: string; job_id: string; status: string }>(
-    `/admin/dramas/uploads/${id}/complete`,
-    body,
+  return fetchMediaJSON<{ upload_id: string; job_id: string; status: string }>(
+    `${mediaBaseURL}/admin/dramas/uploads/${id}/complete`,
+    {
+      method: "POST",
+      headers: { "X-Admin-Token": mediaAdminToken, "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    },
+    timeoutSec,
+    `完成导入任务超时（超过 ${timeoutSec} 秒），服务端结果未知，已保留原会话，请先核对不要新建上传`,
   );
 }
 
@@ -572,9 +579,24 @@ export async function uploadDramaZipAndEnqueue(
     targetId?: string;
     limits?: MediaApi.DramaImportLimits;
     sessionId?: string;
-    onProgress?: (p: { uploadedBytes: number; total: number; phase: "upload" | "complete" }) => void;
+    identity?: { filename: string; total_size: number; last_modified: number; digest: string };
+    onProgress?: (p: {
+      uploadedBytes: number;
+      total: number;
+      phase: "upload" | "complete";
+      sessionId: string;
+      uploadedParts?: number;
+      partCount?: number;
+      expiresAt?: string;
+    }) => void;
   },
-): Promise<{ upload_id: string; job_id: string; status: string; session_id: string }> {
+): Promise<{
+  upload_id: string;
+  job_id: string;
+  status: string;
+  session_id: string;
+  recovered?: boolean;
+}> {
   const maxBytes = opts.limits?.max_zip_bytes ?? 8 * 1024 * 1024 * 1024;
   if (file.size > maxBytes) {
     throw new Error(`压缩包不能超过 ${formatBytesShort(maxBytes)}`);
@@ -582,17 +604,101 @@ export async function uploadDramaZipAndEnqueue(
   const timeoutSec = opts.limits?.import_timeout_sec && opts.limits.import_timeout_sec > 0
     ? opts.limits.import_timeout_sec
     : 600;
+  const emit = (
+    sessionId: string,
+    uploadedBytes: number,
+    phase: "upload" | "complete",
+    extra?: { uploadedParts?: number; partCount?: number; expiresAt?: string },
+  ) => {
+    opts.onProgress?.({
+      uploadedBytes,
+      total: file.size,
+      phase,
+      sessionId,
+      uploadedParts: extra?.uploadedParts,
+      partCount: extra?.partCount,
+      expiresAt: extra?.expiresAt,
+    });
+  };
+
+  const assertSessionFile = (sess: MediaApi.DramaUploadSession) => {
+    if (sess.status === "aborted") {
+      throw new Error("上传会话已取消，不能继续复用，请重新选择文件后新建上传");
+    }
+    if (sess.filename !== file.name || sess.total_size !== file.size) {
+      throw new Error("当前文件与未完成会话不一致，不能复用该会话。请选择原来的 zip 或开始新的上传");
+    }
+    if (sess.expires_at && Number.isFinite(Date.parse(sess.expires_at)) && Date.parse(sess.expires_at) <= Date.now()) {
+      throw new Error("未完成的上传会话已过期，不能继续复用，请重新选择文件后新建上传");
+    }
+    if (opts.identity) {
+      if (opts.identity.filename !== file.name || opts.identity.total_size !== file.size) {
+        throw new Error("当前文件与未完成会话不一致，不能复用该会话。请选择原来的 zip 或开始新的上传");
+      }
+      if (
+        opts.identity.last_modified > 0 &&
+        file.lastModified > 0 &&
+        opts.identity.last_modified !== file.lastModified
+      ) {
+        throw new Error("当前文件与未完成会话不是同一份 zip，不能复用该会话。请选择原来的文件或开始新的上传");
+      }
+    }
+  };
+
   let sessionId = opts.sessionId || "";
+  if (sessionId) {
+    const existing = await getDramaUploadApi(sessionId);
+    assertSessionFile(existing);
+    if (existing.job_id) {
+      emit(existing.id, file.size, "complete", {
+        uploadedParts: (existing.parts || []).filter((p) => p.done).length,
+        partCount: existing.part_count,
+        expiresAt: existing.expires_at,
+      });
+      return {
+        upload_id: existing.id,
+        job_id: existing.job_id,
+        status: existing.status,
+        session_id: existing.id,
+        recovered: true,
+      };
+    }
+  }
   if (!sessionId) {
     const created = await createDramaUploadApi({ filename: file.name, total_size: file.size });
     sessionId = created.id;
+    emit(sessionId, 0, "upload", { uploadedParts: 0, partCount: created.part_count, expiresAt: created.expires_at });
   }
   const sess = await getDramaUploadApi(sessionId);
+  assertSessionFile(sess);
+  if (sess.job_id) {
+    emit(sess.id, file.size, "complete", {
+      uploadedParts: (sess.parts || []).filter((p) => p.done).length,
+      partCount: sess.part_count,
+      expiresAt: sess.expires_at,
+    });
+    return {
+      upload_id: sess.id,
+      job_id: sess.job_id,
+      status: sess.status,
+      session_id: sess.id,
+      recovered: true,
+    };
+  }
+  emit(sess.id, (sess.parts || []).filter((p) => p.done).reduce((s, p) => s + p.size, 0), "upload", {
+    uploadedParts: (sess.parts || []).filter((p) => p.done).length,
+    partCount: sess.part_count,
+    expiresAt: sess.expires_at,
+  });
   let uploaded = 0;
   for (const part of sess.parts || []) {
     if (part.done) {
       uploaded += part.size;
-      opts.onProgress?.({ uploadedBytes: uploaded, total: file.size, phase: "upload" });
+      emit(sess.id, uploaded, "upload", {
+        uploadedParts: (sess.parts || []).filter((p) => p.done || p.n === part.n).length,
+        partCount: sess.part_count,
+        expiresAt: sess.expires_at,
+      });
       continue;
     }
     const blob = file.slice(part.offset, part.offset + part.size);
@@ -602,14 +708,45 @@ export async function uploadDramaZipAndEnqueue(
       await putDramaUploadPartApi(sess.id, part.n, blob, timeoutSec);
     }
     uploaded += part.size;
-    opts.onProgress?.({ uploadedBytes: uploaded, total: file.size, phase: "upload" });
+    emit(sess.id, uploaded, "upload", {
+      uploadedParts: (sess.parts || []).filter((p) => p.done).length + 1,
+      partCount: sess.part_count,
+      expiresAt: sess.expires_at,
+    });
   }
-  opts.onProgress?.({ uploadedBytes: file.size, total: file.size, phase: "complete" });
-  const done = await completeDramaUploadApi(sess.id, {
-    plan: opts.plan,
-    target_id: opts.targetId,
+  emit(sess.id, file.size, "complete", {
+    uploadedParts: sess.part_count,
+    partCount: sess.part_count,
+    expiresAt: sess.expires_at,
   });
-  return { ...done, session_id: sess.id };
+  try {
+    const done = await completeDramaUploadApi(
+      sess.id,
+      { plan: opts.plan, target_id: opts.targetId },
+      timeoutSec,
+    );
+    return { ...done, session_id: sess.id };
+  } catch (e) {
+    const again = await getDramaUploadApi(sess.id).catch(() => null);
+    if (again?.job_id) {
+      return {
+        upload_id: again.id,
+        job_id: again.job_id,
+        status: again.status,
+        session_id: again.id,
+        recovered: true,
+      };
+    }
+    const hint = "完成导入任务的结果未知，已核对并保留原会话，请稍后重试同一会话，不要新建上传";
+    if (e instanceof Error) {
+      const unknown =
+        e.message.includes("结果未知") ||
+        e.message.includes("完成导入任务超时") ||
+        /Failed to fetch|NetworkError/i.test(e.message);
+      throw new Error(unknown ? hint : e.message);
+    }
+    throw new Error(hint);
+  }
 }
 
 export function mediaApiConfigured() {

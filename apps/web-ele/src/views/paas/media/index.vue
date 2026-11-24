@@ -74,6 +74,17 @@ import {
   type DramaZipGroup,
 } from "./dramaZip";
 
+import {
+  clearDramaUploadResume,
+  dramaFileIdentity,
+  fileMatchesIdentity,
+  loadDramaUploadResume,
+  resumeHint,
+  saveDramaUploadResume,
+  type DramaFileIdentity,
+  type DramaUploadResume,
+} from "./dramaUploadResume";
+
 defineOptions({ name: "PaasMedia" });
 
 const pageTab = ref("video");
@@ -216,6 +227,8 @@ const dramaUploadSessionId = ref("");
 const dramaUploadPercent = ref(0);
 const dramaUploadPhase = ref<"idle" | "upload" | "complete" | "job">("idle");
 const dramaImportJob = ref<MediaApi.DramaImportJob | null>(null);
+const dramaUploadResume = ref<DramaUploadResume | null>(null);
+const dramaFileIdent = ref<DramaFileIdentity | null>(null);
 let dramaJobTimer: number | null = null;
 const dramaEdit = reactive({ title: "", intro: "", remark: "", update_status: 1 });
 const episodeForm = reactive({ seq: 1, title: "" });
@@ -668,6 +681,8 @@ async function pollDramaImportJob(id: string) {
   if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
     stopDramaJobPoll();
     if (job.status === "succeeded") {
+      clearDramaUploadResume();
+      dramaUploadResume.value = null;
       pageTab.value = "drama";
       searchForm.kind = 5;
       pagination.current = 1;
@@ -687,17 +702,60 @@ function startDramaJobPoll(id: string) {
   }, 2000);
 }
 
+function persistDramaResume(patch: Partial<DramaUploadResume> = {}) {
+  const ident = dramaFileIdent.value;
+  const sessionId = patch.session_id || dramaUploadSessionId.value;
+  if (!sessionId || !ident) return;
+  const next: DramaUploadResume = {
+    ...ident,
+    session_id: sessionId,
+    job_id: patch.job_id ?? dramaImportJob.value?.id,
+    status: patch.status ?? dramaUploadPhase.value,
+    expires_at: patch.expires_at ?? dramaUploadResume.value?.expires_at,
+    uploaded_parts: patch.uploaded_parts ?? dramaUploadResume.value?.uploaded_parts,
+    part_count: patch.part_count ?? dramaUploadResume.value?.part_count,
+    saved_at: Date.now(),
+  };
+  dramaUploadResume.value = next;
+  saveDramaUploadResume(next);
+}
+
+function applyDramaResume(r: DramaUploadResume | null) {
+  dramaUploadResume.value = r;
+  if (!r) {
+    dramaUploadSessionId.value = "";
+    return;
+  }
+  dramaUploadSessionId.value = r.session_id;
+}
+
+async function discardDramaResume() {
+  clearDramaUploadResume();
+  dramaUploadResume.value = null;
+  dramaUploadSessionId.value = "";
+  const raw = dramaImportFile.value;
+  if (raw) {
+    await onDramaZipChange({ raw });
+  } else {
+    dramaImportError.value = "";
+  }
+}
+
 async function openDramaImport() {
   stopDramaJobPoll();
   dramaImportFile.value = null;
   dramaImportGroups.value = [];
   dramaImportError.value = "";
   dramaImportJob.value = null;
-  dramaUploadSessionId.value = "";
   dramaUploadPercent.value = 0;
   dramaUploadPhase.value = "idle";
   dramaImportConfirmed.value = false;
+  dramaFileIdent.value = null;
+  applyDramaResume(loadDramaUploadResume());
   dramaImportVisible.value = true;
+  if (dramaUploadResume.value?.job_id) {
+    startDramaJobPoll(dramaUploadResume.value.job_id);
+  }
   try {
     dramaImportLimits.value = await getDramaImportLimitsApi();
   } catch {
@@ -716,12 +774,34 @@ async function onDramaZipChange(file: { raw?: File }) {
   dramaImportFile.value = raw || null;
   dramaImportGroups.value = [];
   dramaImportError.value = "";
-  dramaImportJob.value = null;
-  dramaUploadSessionId.value = "";
-  dramaUploadPercent.value = 0;
-  dramaUploadPhase.value = "idle";
   dramaImportConfirmed.value = false;
-  if (!raw) return;
+  dramaFileIdent.value = null;
+  dramaUploadPercent.value = 0;
+  if (!raw) {
+    applyDramaResume(loadDramaUploadResume());
+    return;
+  }
+  const ident = await dramaFileIdentity(raw);
+  dramaFileIdent.value = ident;
+  const resume = loadDramaUploadResume();
+  if (resume) {
+    const mismatch = fileMatchesIdentity(raw, resume, ident.digest);
+    if (mismatch) {
+      dramaUploadSessionId.value = "";
+      dramaUploadResume.value = resume;
+      dramaImportError.value = mismatch;
+      dramaUploadPhase.value = "idle";
+      return;
+    }
+    applyDramaResume(resume);
+    if (resume.job_id && !dramaImportJob.value) {
+      startDramaJobPoll(resume.job_id);
+    }
+  } else {
+    dramaUploadSessionId.value = "";
+    dramaImportJob.value = null;
+    dramaUploadPhase.value = "idle";
+  }
   const lim = dramaImportLimits.value;
   if (lim && raw.size > lim.max_zip_bytes) {
     dramaImportError.value = `压缩包大小 ${humanBytes(raw.size)} 超过上限 ${humanBytes(lim.max_zip_bytes)}`;
@@ -777,25 +857,45 @@ async function submitDramaImport() {
   dramaImporting.value = true;
   dramaUploadPhase.value = "upload";
   try {
+    const ident = dramaFileIdent.value || (await dramaFileIdentity(dramaImportFile.value));
+    dramaFileIdent.value = ident;
     const done = await uploadDramaZipAndEnqueue(dramaImportFile.value, {
       plan: buildImportPlan(dramaImportGroups.value),
       limits: dramaImportLimits.value || defaultDramaImportLimits,
       sessionId: dramaUploadSessionId.value || undefined,
+      identity: ident,
       onProgress: (p) => {
-        dramaUploadSessionId.value = dramaUploadSessionId.value;
+        dramaUploadSessionId.value = p.sessionId;
         dramaUploadPhase.value = p.phase;
         dramaUploadPercent.value = p.total > 0 ? Math.min(100, Math.round((p.uploadedBytes / p.total) * 100)) : 0;
+        persistDramaResume({
+          session_id: p.sessionId,
+          uploaded_parts: p.uploadedParts,
+          part_count: p.partCount,
+          expires_at: p.expiresAt,
+        });
       },
     });
     dramaUploadSessionId.value = done.session_id;
     dramaUploadPercent.value = 100;
-    ElMessage.success("分片已提交，后台正在导入。入库完成不等于全部转码完成。");
+    persistDramaResume({ session_id: done.session_id, job_id: done.job_id, status: done.status });
+    if (done.recovered) {
+      ElMessage.success("已核对到原会话关联的导入任务，无需重新上传。入库完成不等于全部转码完成。");
+    } else {
+      ElMessage.success("分片已提交，后台正在导入。入库完成不等于全部转码完成。");
+    }
     startDramaJobPoll(done.job_id);
   } catch (e: any) {
-    ElMessage.error(e?.message || "上传失败");
+    persistDramaResume({ session_id: dramaUploadSessionId.value });
+    ElMessage.error(e?.message || "上传中断，已保留原会话，可选择同一文件继续");
   } finally {
     dramaImporting.value = false;
   }
+}
+
+function onDramaImportClosed() {
+  persistDramaResume();
+  stopDramaJobPoll();
 }
 
 async function retryDramaImport() {
@@ -1287,7 +1387,7 @@ onMounted(() => {
     </ElDialog>
 
 
-    <ElDialog v-model="dramaImportVisible" title="批量上传短剧" width="860px" destroy-on-close @closed="stopDramaJobPoll">
+    <ElDialog v-model="dramaImportVisible" title="批量上传短剧" width="860px" destroy-on-close @closed="onDramaImportClosed">
       <p class="mb-3 text-sm leading-relaxed text-gray-600">
         先在本地把短剧目录打成 zip 再分片上传（不要把多部剧的视频摊在压缩包根目录以外的零散位置）。
         目录名即剧名，目录内放各集视频和一张封面；支持一次打包多部。
@@ -1307,6 +1407,16 @@ onMounted(() => {
     cover.jpg                 也可以是采集得到的单张 jpeg
   另一部剧/
     另一部剧_第01集.mp4</pre>
+      <ElAlert
+        v-if="dramaUploadResume"
+        class="mb-3"
+        :type="dramaImportError ? 'warning' : 'info'"
+        show-icon
+        :closable="false"
+        :title="resumeHint(dramaUploadResume)"
+      >
+        <ElButton size="small" text type="primary" @click="discardDramaResume">放弃本次恢复</ElButton>
+      </ElAlert>
       <ElUpload :auto-upload="false" :limit="1" accept=".zip,application/zip" :on-change="onDramaZipChange">
         <ElButton>选择 zip</ElButton>
       </ElUpload>
@@ -1394,7 +1504,7 @@ onMounted(() => {
           重试失败步骤
         </ElButton>
         <ElButton type="primary" :loading="dramaImporting" :disabled="!!dramaImportError || !dramaImportFile || dramaUploadPhase === 'job'" @click="submitDramaImport">
-          开始导入
+          {{ dramaUploadSessionId && !dramaImportJob ? "继续上传" : "开始导入" }}
         </ElButton>
       </template>
     </ElDialog>
