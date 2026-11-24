@@ -130,9 +130,9 @@ export function parseEpisodeSeq(filename: string): { seq: number; ok: boolean } 
 
 export function checkZipLimits(zipSize: number, files: ZipEntryMeta[], lim: DramaImportLimits) {
   const zipCap = lim.max_zip_bytes;
-  const bodyCap = lim.max_body_bytes || 0;
-  if (bodyCap > 0 && zipSize > bodyCap) {
-    return `压缩包大小 ${humanBytes(zipSize)} 超过请求体上限 ${humanBytes(bodyCap)}`;
+  // 整包上限是 max_zip_bytes（8GiB）；max_body_bytes 只约束单次 HTTP，不能拿来卡住分片上传的整包预览。
+  if (zipSize > Number.MAX_SAFE_INTEGER) {
+    return "压缩包大小超出可安全处理的整数范围";
   }
   if (zipSize > zipCap) {
     return `压缩包大小 ${humanBytes(zipSize)} 超过上限 ${humanBytes(zipCap)}`;
@@ -143,6 +143,9 @@ export function checkZipLimits(zipSize: number, files: ZipEntryMeta[], lim: Dram
     if (shouldIgnoreZipName(f.name)) continue;
     if (f.uncompressedSize > lim.max_file_bytes) {
       return `文件 ${f.name} 未压缩大小 ${humanBytes(f.uncompressedSize)} 超过单文件上限 ${humanBytes(lim.max_file_bytes)}`;
+    }
+    if (f.uncompressedSize > Number.MAX_SAFE_INTEGER - extract) {
+      return "解压总大小超出可安全处理的整数范围";
     }
     extract += f.uncompressedSize;
     count += 1;
@@ -354,34 +357,297 @@ function isDigit(ch: string) {
   return ch >= "0" && ch <= "9";
 }
 
-export async function listZipEntries(file: Blob): Promise<ZipEntryMeta[]> {
-  const buf = await file.slice(Math.max(0, file.size - 65557)).arrayBuffer();
-  const view = new DataView(buf);
-  let eocd = -1;
-  for (let i = view.byteLength - 22; i >= 0; i -= 1) {
-    if (view.getUint32(i, true) === 0x06054b50) {
-      eocd = i;
-      break;
+const EOCD_SIG = 0x06054b50;
+const ZIP64_EOCD_SIG = 0x06064b50;
+const ZIP64_LOCATOR_SIG = 0x07064b50;
+const CD_SIG = 0x02014b50;
+const ZIP64_EXTRA_ID = 0x0001;
+const U16_MAX = 0xffff;
+const U32_MAX = 0xffffffff;
+const EOCD_SIZE = 22;
+const ZIP64_LOCATOR_SIZE = 20;
+const ZIP64_EOCD_MIN = 56;
+const MAX_EOCD_COMMENT = 65535;
+const FLAG_ENCRYPTED = 0x0001;
+const FLAG_STRONG_ENCRYPTION = 0x0040;
+const FLAG_ENCRYPTED_CD = 0x2000;
+const METHOD_AES = 99;
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+function safeNumber(n: bigint, label: string): number {
+  if (n < 0n) throw new Error(`${label} 无效`);
+  if (n > MAX_SAFE) throw new Error(`${label} 超出可安全处理的整数范围`);
+  return Number(n);
+}
+
+async function readSlice(file: Blob, offset: bigint, length: number, label: string): Promise<ArrayBuffer> {
+  if (length < 0) throw new Error(`${label} 无效`);
+  const start = safeNumber(offset, label);
+  const endBit = offset + BigInt(length);
+  if (endBit > BigInt(file.size)) throw new Error(`${label} 超出文件范围`);
+  const end = safeNumber(endBit, label);
+  const buf = await file.slice(start, end).arrayBuffer();
+  if (buf.byteLength !== length) throw new Error(`${label} 被截断`);
+  return buf;
+}
+
+function findEocd(view: DataView, tailStart: bigint, fileSize: bigint): number {
+  for (let i = view.byteLength - EOCD_SIZE; i >= 0; i -= 1) {
+    if (view.getUint32(i, true) !== EOCD_SIG) continue;
+    const commentLen = view.getUint16(i + 20, true);
+    if (tailStart + BigInt(i) + BigInt(EOCD_SIZE) + BigInt(commentLen) === fileSize) {
+      return i;
     }
   }
-  if (eocd < 0) throw new Error("无法识别 zip 目录，请确认文件完整");
-  const cdSize = view.getUint32(eocd + 12, true);
-  const cdOffset = view.getUint32(eocd + 16, true);
-  const cdBuf = await file.slice(cdOffset, cdOffset + cdSize).arrayBuffer();
+  return -1;
+}
+
+interface Zip64Eocd {
+  thisDisk: number;
+  cdDisk: number;
+  entriesThisDisk: bigint;
+  entriesTotal: bigint;
+  cdSize: bigint;
+  cdOffset: bigint;
+}
+
+async function readZip64Eocd(
+  file: Blob,
+  tail: DataView,
+  tailStart: bigint,
+  eocdAbs: bigint,
+  fileSize: bigint,
+): Promise<Zip64Eocd> {
+  if (eocdAbs < BigInt(ZIP64_LOCATOR_SIZE)) {
+    throw new Error("ZIP64 目录定位信息被截断");
+  }
+  const locAbs = eocdAbs - BigInt(ZIP64_LOCATOR_SIZE);
+  let locView: DataView;
+  const locRel = Number(locAbs - tailStart);
+  if (locAbs >= tailStart && locRel >= 0 && locRel + ZIP64_LOCATOR_SIZE <= tail.byteLength) {
+    locView = new DataView(tail.buffer, tail.byteOffset + locRel, ZIP64_LOCATOR_SIZE);
+  } else {
+    locView = new DataView(await readSlice(file, locAbs, ZIP64_LOCATOR_SIZE, "ZIP64 目录定位信息"));
+  }
+  if (locView.getUint32(0, true) !== ZIP64_LOCATOR_SIG) {
+    throw new Error("这是 ZIP64 压缩包，但缺少 ZIP64 目录定位信息");
+  }
+  const locDisk = locView.getUint32(4, true);
+  const z64Offset = locView.getBigUint64(8, true);
+  const totalDisks = locView.getUint32(16, true);
+  if (locDisk !== 0 || totalDisks !== 1) {
+    throw new Error("不支持分卷或多磁盘 zip");
+  }
+  if (z64Offset > MAX_SAFE) {
+    throw new Error("ZIP64 目录偏移超出可安全处理的整数范围");
+  }
+  if (z64Offset + BigInt(ZIP64_EOCD_MIN) > locAbs) {
+    throw new Error("ZIP64 目录记录位置无效");
+  }
+  const head = new DataView(await readSlice(file, z64Offset, 12, "ZIP64 目录记录"));
+  if (head.getUint32(0, true) !== ZIP64_EOCD_SIG) {
+    throw new Error("ZIP64 目录记录无效");
+  }
+  const recSize = head.getBigUint64(4, true);
+  if (recSize < 44n) {
+    throw new Error("ZIP64 目录记录被截断");
+  }
+  // 只读标准 44 字节字段，不把可扩展区整段载入内存。
+  const body = new DataView(await readSlice(file, z64Offset + 12n, 44, "ZIP64 目录记录"));
+  const thisDisk = body.getUint32(4, true);
+  const cdDisk = body.getUint32(8, true);
+  const entriesThisDisk = body.getBigUint64(12, true);
+  const entriesTotal = body.getBigUint64(20, true);
+  const cdSize = body.getBigUint64(28, true);
+  const cdOffset = body.getBigUint64(36, true);
+  if (thisDisk !== 0 || cdDisk !== 0) {
+    throw new Error("不支持分卷或多磁盘 zip");
+  }
+  if (z64Offset + 12n + recSize > fileSize) {
+    throw new Error("ZIP64 目录记录超出文件范围");
+  }
+  return { thisDisk, cdDisk, entriesThisDisk, entriesTotal, cdSize, cdOffset };
+}
+
+function readZip64Extra(
+  extra: Uint8Array,
+  needUncomp: boolean,
+  needComp: boolean,
+  needOffset: boolean,
+  needDisk: boolean,
+): { uncomp?: bigint; comp?: bigint; offset?: bigint; disk?: number } {
+  const view = new DataView(extra.buffer, extra.byteOffset, extra.byteLength);
+  let p = 0;
+  while (p + 4 <= extra.byteLength) {
+    const id = view.getUint16(p, true);
+    const sz = view.getUint16(p + 2, true);
+    p += 4;
+    if (p + sz > extra.byteLength) throw new Error("ZIP64 扩展字段被截断");
+    if (id !== ZIP64_EXTRA_ID) {
+      p += sz;
+      continue;
+    }
+    const ev = new DataView(extra.buffer, extra.byteOffset + p, sz);
+    let o = 0;
+    const take8 = (label: string) => {
+      if (o + 8 > sz) throw new Error(`ZIP64 扩展字段缺少${label}`);
+      const v = ev.getBigUint64(o, true);
+      o += 8;
+      return v;
+    };
+    const out: { uncomp?: bigint; comp?: bigint; offset?: bigint; disk?: number } = {};
+    // APPNOTE：按 sentinel 顺序出现 uncompressed / compressed / local offset / disk start。
+    if (needUncomp) out.uncomp = take8("未压缩大小");
+    if (needComp) out.comp = take8("压缩大小");
+    if (needOffset) out.offset = take8("本地头偏移");
+    if (needDisk) {
+      if (o + 4 > sz) throw new Error("ZIP64 扩展字段缺少起始磁盘号");
+      out.disk = ev.getUint32(o, true);
+      o += 4;
+    }
+    return out;
+  }
+  if (needUncomp || needComp || needOffset || needDisk) {
+    throw new Error("中央目录项缺少必需的 ZIP64 扩展字段");
+  }
+  return {};
+}
+
+/**
+ * 列出 zip 中央目录项。只切片 EOCD/ZIP64 记录与中央目录，不把整包读进内存。
+ * 传统 32 位 zip 与单磁盘 ZIP64（含强制 ZIP64 小包）均可；加密与分卷明确拒绝。
+ */
+export async function listZipEntries(
+  file: Blob,
+  lim: DramaImportLimits = defaultDramaImportLimits,
+): Promise<ZipEntryMeta[]> {
+  if (!Number.isSafeInteger(file.size) || file.size < 0) {
+    throw new Error("压缩包大小超出可安全处理的整数范围");
+  }
+  const fileSize = BigInt(file.size);
+  if (fileSize < BigInt(EOCD_SIZE)) throw new Error("无法识别 zip 目录，请确认文件完整");
+
+  const tailWant = BigInt(EOCD_SIZE + MAX_EOCD_COMMENT + ZIP64_LOCATOR_SIZE);
+  const tailLen = fileSize < tailWant ? fileSize : tailWant;
+  const tailStart = fileSize - tailLen;
+  const tailBuf = await file.slice(safeNumber(tailStart, "目录尾"), safeNumber(fileSize, "目录尾")).arrayBuffer();
+  const tail = new DataView(tailBuf);
+  const eocdRel = findEocd(tail, tailStart, fileSize);
+  if (eocdRel < 0) throw new Error("无法识别 zip 目录，请确认文件完整");
+  const eocdAbs = tailStart + BigInt(eocdRel);
+
+  const thisDisk16 = tail.getUint16(eocdRel + 4, true);
+  const cdDisk16 = tail.getUint16(eocdRel + 6, true);
+  const entriesThis16 = tail.getUint16(eocdRel + 8, true);
+  const entriesTotal16 = tail.getUint16(eocdRel + 10, true);
+  const cdSize32 = tail.getUint32(eocdRel + 12, true);
+  const cdOffset32 = tail.getUint32(eocdRel + 16, true);
+
+  let thisDisk = thisDisk16;
+  let cdDisk = cdDisk16;
+  let entriesThisDisk = BigInt(entriesThis16);
+  let entriesTotal = BigInt(entriesTotal16);
+  let cdSize = BigInt(cdSize32);
+  let cdOffset = BigInt(cdOffset32);
+
+  const need64 =
+    thisDisk16 === U16_MAX ||
+    cdDisk16 === U16_MAX ||
+    entriesThis16 === U16_MAX ||
+    entriesTotal16 === U16_MAX ||
+    cdSize32 === U32_MAX ||
+    cdOffset32 === U32_MAX;
+
+  if (need64) {
+    const z64 = await readZip64Eocd(file, tail, tailStart, eocdAbs, fileSize);
+    if (thisDisk16 === U16_MAX) thisDisk = z64.thisDisk;
+    if (cdDisk16 === U16_MAX) cdDisk = z64.cdDisk;
+    if (entriesThis16 === U16_MAX) entriesThisDisk = z64.entriesThisDisk;
+    if (entriesTotal16 === U16_MAX) entriesTotal = z64.entriesTotal;
+    if (cdSize32 === U32_MAX) cdSize = z64.cdSize;
+    if (cdOffset32 === U32_MAX) cdOffset = z64.cdOffset;
+  }
+
+  if (thisDisk !== 0 || cdDisk !== 0) {
+    throw new Error("不支持分卷或多磁盘 zip");
+  }
+  if (entriesThisDisk !== entriesTotal) {
+    throw new Error("不支持分卷或多磁盘 zip");
+  }
+  if (cdOffset > MAX_SAFE || cdSize > MAX_SAFE || entriesTotal > MAX_SAFE) {
+    throw new Error("zip 目录字段超出可安全处理的整数范围");
+  }
+  if (cdOffset + cdSize > fileSize) {
+    throw new Error("中央目录超出文件范围");
+  }
+
+  const maxFiles = lim.max_files > 0 ? lim.max_files : defaultDramaImportLimits.max_files;
+  // 计入可忽略项的上限，避免按恶意条目数把巨型中央目录读进内存。
+  const entryCap = Math.max(maxFiles * 8, maxFiles);
+  if (entriesTotal > BigInt(entryCap)) {
+    throw new Error(`压缩包文件数超过上限 ${maxFiles}`);
+  }
+  if (entriesTotal > 0n) {
+    const minCd = entriesTotal * 46n;
+    const maxCd = entriesTotal * BigInt(46 + 65535 * 3);
+    if (cdSize < minCd || cdSize > maxCd) {
+      throw new Error("中央目录大小与条目数不一致");
+    }
+  } else if (cdSize !== 0n) {
+    throw new Error("中央目录大小与条目数不一致");
+  }
+
+  const cdBuf = await readSlice(file, cdOffset, safeNumber(cdSize, "中央目录大小"), "中央目录");
   const cd = new DataView(cdBuf);
   const out: ZipEntryMeta[] = [];
   let p = 0;
-  while (p + 46 <= cd.byteLength) {
-    if (cd.getUint32(p, true) !== 0x02014b50) break;
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  while (p < cd.byteLength) {
+    if (p + 46 > cd.byteLength) throw new Error("中央目录被截断");
+    if (cd.getUint32(p, true) !== CD_SIG) {
+      throw new Error("中央目录记录无效或被截断");
+    }
+    const flags = cd.getUint16(p + 8, true);
+    const method = cd.getUint16(p + 10, true);
+    if ((flags & FLAG_ENCRYPTED) !== 0 || (flags & FLAG_STRONG_ENCRYPTION) !== 0 || (flags & FLAG_ENCRYPTED_CD) !== 0 || method === METHOD_AES) {
+      throw new Error("不支持加密的 zip");
+    }
     const nameLen = cd.getUint16(p + 28, true);
     const extraLen = cd.getUint16(p + 30, true);
     const commentLen = cd.getUint16(p + 32, true);
-    const compressed = cd.getUint32(p + 20, true);
-    const uncompressed = cd.getUint32(p + 24, true);
+    const recLen = 46 + nameLen + extraLen + commentLen;
+    if (p + recLen > cd.byteLength) throw new Error("中央目录被截断");
+    let compressed = BigInt(cd.getUint32(p + 20, true));
+    let uncompressed = BigInt(cd.getUint32(p + 24, true));
+    let localOffset = BigInt(cd.getUint32(p + 42, true));
+    let diskStart = cd.getUint16(p + 34, true);
+    const extra = new Uint8Array(cdBuf, p + 46 + nameLen, extraLen);
+    const zextra = readZip64Extra(
+      extra,
+      uncompressed === BigInt(U32_MAX),
+      compressed === BigInt(U32_MAX),
+      localOffset === BigInt(U32_MAX),
+      diskStart === U16_MAX,
+    );
+    if (zextra.uncomp !== undefined) uncompressed = zextra.uncomp;
+    if (zextra.comp !== undefined) compressed = zextra.comp;
+    if (zextra.offset !== undefined) localOffset = zextra.offset;
+    if (zextra.disk !== undefined) diskStart = zextra.disk;
+    if (diskStart !== 0) throw new Error("不支持分卷或多磁盘 zip");
     const nameBytes = new Uint8Array(cdBuf, p + 46, nameLen);
-    const name = new TextDecoder("utf-8", { fatal: false }).decode(nameBytes);
-    out.push({ name, compressedSize: compressed, uncompressedSize: uncompressed });
-    p += 46 + nameLen + extraLen + commentLen;
+    const name = decoder.decode(nameBytes);
+    out.push({
+      name,
+      compressedSize: safeNumber(compressed, `文件 ${name} 的压缩大小`),
+      uncompressedSize: safeNumber(uncompressed, `文件 ${name} 的未压缩大小`),
+    });
+    p += recLen;
+    if (out.length > entryCap) {
+      throw new Error(`压缩包文件数超过上限 ${maxFiles}`);
+    }
+  }
+  if (entriesTotal > 0n && BigInt(out.length) !== entriesTotal) {
+    throw new Error("中央目录条目数与目录记录不一致");
   }
   if (!out.length) throw new Error("压缩包目录为空");
   return out;
