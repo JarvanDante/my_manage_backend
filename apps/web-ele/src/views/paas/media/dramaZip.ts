@@ -19,6 +19,7 @@ export interface DramaFile {
 
 export interface DramaZipGroup {
   title: string;
+  targetId: string;
   videos: DramaFile[];
   covers: DramaFile[];
   coverPath: string;
@@ -30,24 +31,31 @@ export interface DramaZipGroup {
 export interface DramaImportLimits {
   max_zip_bytes: number;
   max_body_bytes?: number;
+  max_chunk_bytes?: number;
+  max_parts?: number;
   max_extract_bytes: number;
   max_files: number;
   max_file_bytes: number;
   max_ratio: number;
   min_free_bytes: number;
   import_timeout_sec?: number;
+  job_timeout_sec?: number;
+  max_running_jobs?: number;
 }
 
-/** 与后端默认一致：公网 Cloudflare 免费/Pro 约 100MB 请求体，zip 预留表单余量。 */
+/** 与后端默认一致：整包/单集恢复大文件能力；单次 HTTP 仍约 100MB，分片默认 32MiB。 */
 export const defaultDramaImportLimits: DramaImportLimits = {
-  max_zip_bytes: 96_000_000,
+  max_zip_bytes: 8 * 1024 * 1024 * 1024,
   max_body_bytes: 100_000_000,
-  max_extract_bytes: 192_000_000,
-  max_files: 500,
-  max_file_bytes: 96_000_000,
+  max_chunk_bytes: 32 * 1024 * 1024,
+  max_extract_bytes: 16 * 1024 * 1024 * 1024,
+  max_files: 2000,
+  max_file_bytes: 2 * 1024 * 1024 * 1024,
   max_ratio: 100,
   min_free_bytes: 1024 * 1024 * 1024,
   import_timeout_sec: 600,
+  job_timeout_sec: 7200,
+  max_running_jobs: 1,
 };
 
 const reHua = /第\s*0*(\d+)\s*[集话章回話]/;
@@ -162,6 +170,7 @@ export function groupDramaZip(files: ZipEntryMeta[], zipBase: string): DramaZipG
   return order.map((key) => {
     const g: DramaZipGroup = {
       title: groupTitle(key, zipBase),
+      targetId: "",
       videos: [],
       covers: [],
       coverPath: "",
@@ -351,6 +360,7 @@ export function buildImportPlan(groups: DramaZipGroup[]) {
     items: groups.map((g) => ({
       title: g.title,
       cover: g.coverPath,
+      target_id: g.targetId || undefined,
       episodes: g.videos.map((v) => ({
         path: v.path,
         seq: v.seq,

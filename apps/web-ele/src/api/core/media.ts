@@ -115,15 +115,20 @@ export namespace MediaApi {
   export interface DramaImportLimits {
     max_zip_bytes: number;
     max_body_bytes?: number;
+    max_chunk_bytes?: number;
+    max_parts?: number;
     max_extract_bytes: number;
     max_files: number;
     max_file_bytes: number;
     max_ratio: number;
     min_free_bytes: number;
     import_timeout_sec?: number;
+    job_timeout_sec?: number;
+    max_running_jobs?: number;
   }
 
   export interface ImportDramasData {
+    job_id?: string;
     imported: number;
     failed_count: number;
     list: {
@@ -135,6 +140,62 @@ export namespace MediaApi {
       imported_count?: number;
     }[];
     failed: { title: string; error: string }[];
+  }
+
+  export interface DramaUploadPart {
+    n: number;
+    offset: number;
+    size: number;
+    done: boolean;
+    mode: string;
+    url?: string;
+  }
+
+  export interface DramaUploadSession {
+    id: string;
+    filename: string;
+    total_size: number;
+    chunk_size: number;
+    part_count: number;
+    status: string;
+    expires_at: string;
+    job_id?: string;
+    parts: DramaUploadPart[];
+  }
+
+  export interface DramaImportJobDrama {
+    id: string;
+    title: string;
+    chapter_count: number;
+    appended?: boolean;
+    skipped_count?: number;
+    imported_count?: number;
+    ready_count?: number;
+    processing_count?: number;
+    failed_count?: number;
+  }
+
+  export interface DramaImportJob {
+    id: string;
+    upload_id: string;
+    status: string;
+    stage: string;
+    progress: number;
+    message: string;
+    error: string;
+    attempts: number;
+    max_attempts: number;
+    imported: number;
+    failed_count: number;
+    list: DramaImportJobDrama[];
+    failed: { title: string; error: string }[];
+    episode_total: number;
+    episode_ready: number;
+    episode_processing: number;
+    episode_failed: number;
+    created_at: string;
+    updated_at: string;
+    finished_at?: string;
   }
 
   export interface ImportComicsData {
@@ -380,75 +441,175 @@ function formatBytesShort(n: number) {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
-export async function importDramaZipApi(
-  file: File,
-  opts: {
-    resume?: boolean;
-    plan?: unknown;
-    maxBytes?: number;
-    maxBodyBytes?: number;
-    timeoutSec?: number;
-  },
-) {
-  const maxBytes = opts.maxBytes ?? 96_000_000;
-  const maxBody = opts.maxBodyBytes ?? 100_000_000;
-  if (file.size > maxBytes) {
-    throw new Error(`压缩包不能超过 ${formatBytesShort(maxBytes)}`);
-  }
-  if (maxBody > 0 && file.size > maxBody) {
-    throw new Error(`压缩包不能超过请求体上限 ${formatBytesShort(maxBody)}`);
-  }
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("resume", opts.resume ? "1" : "0");
-  if (opts.plan) {
-    fd.append("plan", JSON.stringify(opts.plan));
-  }
-  const timeoutSec = opts.timeoutSec && opts.timeoutSec > 0 ? opts.timeoutSec : 600;
+async function fetchMediaJSON<T>(
+  input: string,
+  init: RequestInit,
+  timeoutSec: number,
+  timeoutMsg: string,
+): Promise<T> {
   const ac = new AbortController();
-  const timer = window.setTimeout(() => ac.abort(), timeoutSec * 1000);
-  let res: Response;
+  const timer = window.setTimeout(() => ac.abort(), (timeoutSec > 0 ? timeoutSec : 600) * 1000);
+  let res: Response | undefined;
+  let text = "";
   try {
-    res = await fetch(`${mediaBaseURL}/admin/dramas/import`, {
-      method: "POST",
-      headers: { "X-Admin-Token": mediaAdminToken },
-      body: fd,
-      signal: ac.signal,
-    });
+    res = await fetch(input, { ...init, signal: ac.signal });
+    text = await res.text();
   } catch (e: any) {
     if (e?.name === "AbortError") {
-      throw new Error(`导入超时（超过 ${timeoutSec} 秒），请缩小压缩包后重试`);
+      throw new Error(timeoutMsg);
     }
     throw e;
   } finally {
     window.clearTimeout(timer);
   }
-  const text = await res.text();
-  let json: {
-    code: number;
-    message?: string;
-    data: MediaApi.ImportDramasData;
-  };
   const tooLarge =
-    res.status === 413 ||
+    (res && res.status === 413) ||
     /body too large|ParseMultipartForm|entity too large|request entity too large/i.test(text);
   if (tooLarge) {
-    throw new Error(
-      `上传被拒绝：请求体超过允许上限（压缩包 ${formatBytesShort(maxBytes)}，请求体 ${formatBytesShort(maxBody)}）。请缩小压缩包后重试。`,
-    );
+    throw new Error("上传被拒绝：请求体超过允许上限。请检查分片大小后重试。");
   }
-  if (res.status === 504 || res.status === 408 || /timeout/i.test(text || "")) {
-    throw new Error(`导入超时（超过 ${timeoutSec} 秒），请缩小压缩包后重试`);
-  }
+  let json: { code: number; message?: string; data: T } | undefined;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(text?.slice(0, 120) || `导入失败 HTTP ${res.status}`);
+    if (res && (res.status === 504 || res.status === 408)) {
+      throw new Error(timeoutMsg);
+    }
+    throw new Error(text?.slice(0, 120) || `请求失败 HTTP ${res?.status ?? 0}`);
   }
-  if (!res.ok || json.code !== 0) {
-    throw new Error(json.message || `导入失败 HTTP ${res.status}`);
+  // 先判定结构化成功，避免标题等字段命中 timeout 字样
+  if (json && res && res.ok && json.code === 0) {
+    return json.data;
   }
-  return json.data;
+  if (res && (res.status === 504 || res.status === 408)) {
+    throw new Error(timeoutMsg);
+  }
+  throw new Error(json?.message || `请求失败 HTTP ${res?.status ?? 0}`);
+}
+
+export function createDramaUploadApi(body: { filename: string; total_size: number }) {
+  return mediaClient.post<MediaApi.DramaUploadSession>("/admin/dramas/uploads", body);
+}
+
+export function getDramaUploadApi(id: string) {
+  return mediaClient.get<MediaApi.DramaUploadSession>(`/admin/dramas/uploads/${id}`);
+}
+
+export function completeDramaUploadApi(
+  id: string,
+  body: { plan?: unknown; target_id?: string },
+) {
+  return mediaClient.post<{ upload_id: string; job_id: string; status: string }>(
+    `/admin/dramas/uploads/${id}/complete`,
+    body,
+  );
+}
+
+export function abortDramaUploadApi(id: string) {
+  return mediaClient.post<{ id: string; deleted: number }>(
+    `/admin/dramas/uploads/${id}/abort`,
+    {},
+  );
+}
+
+export function getDramaImportJobApi(id: string) {
+  return mediaClient.get<MediaApi.DramaImportJob>(`/admin/dramas/import-jobs/${id}`);
+}
+
+export function retryDramaImportJobApi(id: string) {
+  return mediaClient.post<MediaApi.DramaImportJob>(
+    `/admin/dramas/import-jobs/${id}/retry`,
+    {},
+  );
+}
+
+export async function putDramaUploadPartApi(
+  id: string,
+  n: number,
+  blob: Blob,
+  timeoutSec = 600,
+) {
+  return fetchMediaJSON(
+    `${mediaBaseURL}/admin/dramas/uploads/${id}/parts/${n}`,
+    {
+      method: "PUT",
+      headers: { "X-Admin-Token": mediaAdminToken },
+      body: blob,
+    },
+    timeoutSec,
+    `分片上传超时（超过 ${timeoutSec} 秒），结果可能部分完成，请刷新核对后再决定重试`,
+  );
+}
+
+export async function putMediaFileWithTimeout(
+  uploadUrl: string,
+  file: Blob,
+  timeoutSec = 600,
+) {
+  const ac = new AbortController();
+  const timer = window.setTimeout(() => ac.abort(), (timeoutSec > 0 ? timeoutSec : 600) * 1000);
+  try {
+    const res = await fetch(uploadUrl, { method: "PUT", body: file, signal: ac.signal });
+    if (!res.ok) {
+      throw new Error(`上传失败 HTTP ${res.status}`);
+    }
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(
+        `分片上传超时（超过 ${timeoutSec} 秒），结果可能部分完成，请刷新核对后再决定重试`,
+      );
+    }
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export async function uploadDramaZipAndEnqueue(
+  file: File,
+  opts: {
+    plan?: unknown;
+    targetId?: string;
+    limits?: MediaApi.DramaImportLimits;
+    sessionId?: string;
+    onProgress?: (p: { uploadedBytes: number; total: number; phase: "upload" | "complete" }) => void;
+  },
+): Promise<{ upload_id: string; job_id: string; status: string; session_id: string }> {
+  const maxBytes = opts.limits?.max_zip_bytes ?? 8 * 1024 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(`压缩包不能超过 ${formatBytesShort(maxBytes)}`);
+  }
+  const timeoutSec = opts.limits?.import_timeout_sec && opts.limits.import_timeout_sec > 0
+    ? opts.limits.import_timeout_sec
+    : 600;
+  let sessionId = opts.sessionId || "";
+  if (!sessionId) {
+    const created = await createDramaUploadApi({ filename: file.name, total_size: file.size });
+    sessionId = created.id;
+  }
+  const sess = await getDramaUploadApi(sessionId);
+  let uploaded = 0;
+  for (const part of sess.parts || []) {
+    if (part.done) {
+      uploaded += part.size;
+      opts.onProgress?.({ uploadedBytes: uploaded, total: file.size, phase: "upload" });
+      continue;
+    }
+    const blob = file.slice(part.offset, part.offset + part.size);
+    if (part.mode === "presign" && part.url) {
+      await putMediaFileWithTimeout(part.url, blob, timeoutSec);
+    } else {
+      await putDramaUploadPartApi(sess.id, part.n, blob, timeoutSec);
+    }
+    uploaded += part.size;
+    opts.onProgress?.({ uploadedBytes: uploaded, total: file.size, phase: "upload" });
+  }
+  opts.onProgress?.({ uploadedBytes: file.size, total: file.size, phase: "complete" });
+  const done = await completeDramaUploadApi(sess.id, {
+    plan: opts.plan,
+    target_id: opts.targetId,
+  });
+  return { ...done, session_id: sess.id };
 }
 
 export function mediaApiConfigured() {

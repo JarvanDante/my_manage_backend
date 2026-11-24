@@ -23,6 +23,7 @@ import {
   ElMessageBox,
   ElOption,
   ElPagination,
+  ElProgress,
   ElRadioButton,
   ElRadioGroup,
   ElSelect,
@@ -44,15 +45,17 @@ import {
   createMediaNovelChapterApi,
   deleteMediaAssetApi,
   deleteMediaComicChapterApi,
+  getDramaImportJobApi,
   getDramaImportLimitsApi,
   getMediaAssetDetailApi,
   getMediaAssetListApi,
   getMediaUploadUrlApi,
   importComicsZipApi,
-  importDramaZipApi,
   importNovelZipApi,
   mediaApiConfigured,
   putMediaFile,
+  retryDramaImportJobApi,
+  uploadDramaZipAndEnqueue,
   replaceMediaCoverApi,
   triggerMediaTranscodeApi,
   updateMediaAssetApi,
@@ -88,7 +91,7 @@ function paneHint(kind: number) {
   if (kind === 2) return "上传原片后转码为 HLS，对象落在 MinIO cartoon/（与 media/ 同级）";
   if (kind === 3) return "上传原片后转码为 HLS，对象落在 MinIO video/（与 media/ 同级）";
   if (kind === 4) return "zip 导入正文进 PostgreSQL，封面写 my-media/novels/，无需转码";
-  if (kind === 5) return "zip 按目录名入库，对象落在 MinIO drama/；剧集转码为 HLS";
+  if (kind === 5) return "zip 分片上传后异步入库，对象落在 MinIO drama/；剧集走原转码队列转 HLS";
   return "上传原片后转码为 HLS，封面自动截取";
 }
 
@@ -204,12 +207,16 @@ const importResult = ref<MediaApi.ImportComicsData | null>(null);
 const dramaImportVisible = ref(false);
 const dramaImporting = ref(false);
 const dramaImportFile = ref<File | null>(null);
-const dramaImportResume = ref(true);
 const dramaImportConfirmed = ref(false);
 const dramaImportError = ref("");
 const dramaImportGroups = ref<DramaZipGroup[]>([]);
 const dramaImportLimits = ref<DramaImportLimits | null>(null);
-const dramaImportResult = ref<MediaApi.ImportDramasData | null>(null);
+const dramaImportTargets = ref<{ id: string; title: string }[]>([]);
+const dramaUploadSessionId = ref("");
+const dramaUploadPercent = ref(0);
+const dramaUploadPhase = ref<"idle" | "upload" | "complete" | "job">("idle");
+const dramaImportJob = ref<MediaApi.DramaImportJob | null>(null);
+let dramaJobTimer: number | null = null;
 const dramaEdit = reactive({ title: "", intro: "", remark: "", update_status: 1 });
 const episodeForm = reactive({ seq: 1, title: "" });
 const selectedEpisodeId = ref("");
@@ -442,7 +449,7 @@ watch(
   },
 );
 
-onBeforeUnmount(destroyPlayer);
+onBeforeUnmount(() => { stopDramaJobPoll(); destroyPlayer(); });
 
 async function openDetail(id: string) {
   detailVisible.value = true;
@@ -630,18 +637,72 @@ async function onDeleteEpisode(ep: MediaApi.DramaEpisode) {
   }
 }
 
+function stopDramaJobPoll() {
+  if (dramaJobTimer != null) {
+    window.clearInterval(dramaJobTimer);
+    dramaJobTimer = null;
+  }
+}
+
+function dramaJobStatusText(job: MediaApi.DramaImportJob | null) {
+  if (!job) return "";
+  if (job.status === "queued") return "已排队，等待后台导入";
+  if (job.status === "running") return job.message || "正在解压入库";
+  if (job.status === "import_done") {
+    return `入库完成（不等于全部转码完成）。转码就绪 ${job.episode_ready}/${job.episode_total}，处理中 ${job.episode_processing}，失败 ${job.episode_failed}`;
+  }
+  if (job.status === "succeeded") return `全部 ${job.episode_total} 集已转码完成`;
+  if (job.status === "failed") return job.error || job.message || "导入失败";
+  if (job.status === "canceled") return "任务已取消";
+  return job.message || job.status;
+}
+
+async function pollDramaImportJob(id: string) {
+  const job = await getDramaImportJobApi(id);
+  dramaImportJob.value = job;
+  if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
+    stopDramaJobPoll();
+    if (job.status === "succeeded") {
+      pageTab.value = "drama";
+      searchForm.kind = 5;
+      pagination.current = 1;
+      await fetchList();
+    }
+  }
+}
+
+function startDramaJobPoll(id: string) {
+  stopDramaJobPoll();
+  dramaUploadPhase.value = "job";
+  pollDramaImportJob(id).catch((e) => {
+    ElMessage.error(e?.message || "查询导入任务失败");
+  });
+  dramaJobTimer = window.setInterval(() => {
+    pollDramaImportJob(id).catch(() => undefined);
+  }, 2000);
+}
+
 async function openDramaImport() {
+  stopDramaJobPoll();
   dramaImportFile.value = null;
   dramaImportGroups.value = [];
   dramaImportError.value = "";
-  dramaImportResult.value = null;
-  dramaImportResume.value = true;
+  dramaImportJob.value = null;
+  dramaUploadSessionId.value = "";
+  dramaUploadPercent.value = 0;
+  dramaUploadPhase.value = "idle";
   dramaImportConfirmed.value = false;
   dramaImportVisible.value = true;
   try {
     dramaImportLimits.value = await getDramaImportLimitsApi();
   } catch {
     dramaImportLimits.value = { ...defaultDramaImportLimits };
+  }
+  try {
+    const data = await getMediaAssetListApi({ page: 1, size: 200, kind: 5 });
+    dramaImportTargets.value = (data?.list || []).map((it) => ({ id: it.id, title: it.title }));
+  } catch {
+    dramaImportTargets.value = [];
   }
 }
 
@@ -650,14 +711,13 @@ async function onDramaZipChange(file: { raw?: File }) {
   dramaImportFile.value = raw || null;
   dramaImportGroups.value = [];
   dramaImportError.value = "";
-  dramaImportResult.value = null;
+  dramaImportJob.value = null;
+  dramaUploadSessionId.value = "";
+  dramaUploadPercent.value = 0;
+  dramaUploadPhase.value = "idle";
   dramaImportConfirmed.value = false;
   if (!raw) return;
   const lim = dramaImportLimits.value;
-  if (lim && lim.max_body_bytes && raw.size > lim.max_body_bytes) {
-    dramaImportError.value = `压缩包大小 ${humanBytes(raw.size)} 超过请求体上限 ${humanBytes(lim.max_body_bytes)}`;
-    return;
-  }
   if (lim && raw.size > lim.max_zip_bytes) {
     dramaImportError.value = `压缩包大小 ${humanBytes(raw.size)} 超过上限 ${humanBytes(lim.max_zip_bytes)}`;
     return;
@@ -710,24 +770,39 @@ async function submitDramaImport() {
     }
   }
   dramaImporting.value = true;
+  dramaUploadPhase.value = "upload";
   try {
-    const data = await importDramaZipApi(dramaImportFile.value, {
-      resume: dramaImportResume.value,
+    const done = await uploadDramaZipAndEnqueue(dramaImportFile.value, {
       plan: buildImportPlan(dramaImportGroups.value),
-      maxBytes: dramaImportLimits.value?.max_zip_bytes,
-      maxBodyBytes: dramaImportLimits.value?.max_body_bytes,
-      timeoutSec: dramaImportLimits.value?.import_timeout_sec,
+      limits: dramaImportLimits.value || defaultDramaImportLimits,
+      sessionId: dramaUploadSessionId.value || undefined,
+      onProgress: (p) => {
+        dramaUploadSessionId.value = dramaUploadSessionId.value;
+        dramaUploadPhase.value = p.phase;
+        dramaUploadPercent.value = p.total > 0 ? Math.min(100, Math.round((p.uploadedBytes / p.total) * 100)) : 0;
+      },
     });
-    dramaImportResult.value = data;
-    ElMessage.success(`已导入 ${data.imported} 部短剧`);
-    pageTab.value = "drama";
-    searchForm.kind = 5;
-    pagination.current = 1;
-    await fetchList();
+    dramaUploadSessionId.value = done.session_id;
+    dramaUploadPercent.value = 100;
+    ElMessage.success("分片已提交，后台正在导入。入库完成不等于全部转码完成。");
+    startDramaJobPoll(done.job_id);
   } catch (e: any) {
-    ElMessage.error(e?.message || "导入失败");
+    ElMessage.error(e?.message || "上传失败");
   } finally {
     dramaImporting.value = false;
+  }
+}
+
+async function retryDramaImport() {
+  const job = dramaImportJob.value;
+  if (!job?.id) return;
+  try {
+    const next = await retryDramaImportJobApi(job.id);
+    dramaImportJob.value = next;
+    ElMessage.success("已提交重试");
+    startDramaJobPoll(next.id);
+  } catch (e: any) {
+    ElMessage.error(e?.message || "重试失败");
   }
 }
 
@@ -1207,18 +1282,18 @@ onMounted(() => {
     </ElDialog>
 
 
-    <ElDialog v-model="dramaImportVisible" title="批量上传短剧" width="860px" destroy-on-close>
+    <ElDialog v-model="dramaImportVisible" title="批量上传短剧" width="860px" destroy-on-close @closed="stopDramaJobPoll">
       <p class="mb-3 text-sm leading-relaxed text-gray-600">
-        先在本地把短剧目录打成 zip 再上传（不要把多部剧的视频摊在压缩包根目录以外的零散位置）。
+        先在本地把短剧目录打成 zip 再分片上传（不要把多部剧的视频摊在压缩包根目录以外的零散位置）。
         目录名即剧名，目录内放各集视频和一张封面；支持一次打包多部。
-        压缩包上限
+        整包上限
         {{ humanBytes((dramaImportLimits || defaultDramaImportLimits).max_zip_bytes) }}
-        ，请求体上限
-        {{ humanBytes((dramaImportLimits || defaultDramaImportLimits).max_body_bytes || 100000000) }}
-        （含表单余量）。公网经 Cloudflare 免费/Pro 单请求约 100MB，只调大集群 Ingress 不能传到 2GB。
-        导入须在
-        {{ Math.round(((dramaImportLimits || defaultDramaImportLimits).import_timeout_sec || 600) / 60) }}
-        分钟内完成，超时会失败。ZIP 通常不会明显减小视频体积。
+        ，单集上限
+        {{ humanBytes((dramaImportLimits || defaultDramaImportLimits).max_file_bytes) }}
+        ，单片约
+        {{ humanBytes((dramaImportLimits || defaultDramaImportLimits).max_chunk_bytes || 32 * 1024 * 1024) }}
+        （须小于公网约 100MB 的单次请求限制）。上传完成后立即进入后台任务：先解压入库，再逐集走原转码队列；入库完成不等于全部转码完成。
+        默认创建新剧；若要向已有短剧追加集数，请显式选择目标，不要靠修改标题识别。ZIP 通常不会明显减小视频体积。
       </p>
       <pre class="mb-4 overflow-auto rounded bg-gray-50 p-3 text-xs leading-6 text-gray-700">剧名或父目录/
   剧名/
@@ -1236,6 +1311,16 @@ onMounted(() => {
           <div class="mb-2 flex flex-wrap items-center gap-2">
             <span class="text-sm text-gray-500">剧名</span>
             <ElInput v-model="g.title" class="!w-72" />
+            <span class="text-sm text-gray-500">入库方式</span>
+            <ElSelect v-model="g.targetId" placeholder="创建新剧" class="!w-64" clearable filterable>
+              <ElOption label="创建新剧" value="" />
+              <ElOption
+                v-for="it in dramaImportTargets"
+                :key="it.id"
+                :label="`续传到「${it.title}」(${it.id})`"
+                :value="it.id"
+              />
+            </ElSelect>
             <span class="text-sm text-gray-500">封面</span>
             <ElSelect v-model="g.coverPath" clearable placeholder="请选择" class="!w-56">
               <ElOption
@@ -1262,36 +1347,48 @@ onMounted(() => {
           </ElTable>
         </div>
       </div>
-      <div class="mt-3 flex items-center gap-2">
-        <span class="text-sm text-gray-700">续传</span>
-        <ElSwitch v-model="dramaImportResume" />
-        <span class="text-xs text-gray-400">开启后同名短剧追加未入库集数，已有集号跳过</span>
-      </div>
       <div class="mt-2 flex items-center gap-2">
         <ElSwitch v-model="dramaImportConfirmed" />
-        <span class="text-sm text-gray-700">已核对集号、封面，确认导入</span>
+        <span class="text-sm text-gray-700">已核对集号、封面和入库目标，确认导入</span>
       </div>
-      <div v-if="dramaImportResult" class="mt-4 text-sm">
-        <p>
-          成功 {{ dramaImportResult.imported }} 部
-          <span v-if="dramaImportResult.failed_count">，失败 {{ dramaImportResult.failed_count }}</span>
+      <div v-if="dramaUploadPhase !== 'idle'" class="mt-4">
+        <p class="mb-1 text-sm text-gray-600">
+          <template v-if="dramaUploadPhase === 'upload' || dramaUploadPhase === 'complete'">上传进度（与后台导入任务分开）</template>
+          <template v-else>后台任务进度</template>
         </p>
-        <ul v-if="dramaImportResult.list?.length" class="mt-2 list-disc pl-5">
-          <li v-for="item in dramaImportResult.list" :key="item.id">
-            {{ item.title }} · {{ item.chapter_count }} 集
-            <span v-if="item.appended"> · 续传</span>
-            <span v-if="item.skipped_count"> · 跳过 {{ item.skipped_count }} 集</span>
+        <ElProgress v-if="dramaUploadPhase === 'upload' || dramaUploadPhase === 'complete'" :percentage="dramaUploadPercent" />
+        <p v-if="dramaUploadPhase === 'complete'" class="mt-1 text-xs text-gray-500">正在创建导入任务…</p>
+      </div>
+      <div v-if="dramaImportJob" class="mt-4 text-sm">
+        <p>任务 {{ dramaImportJob.id }} · {{ dramaJobStatusText(dramaImportJob) }}</p>
+        <ElProgress
+          class="mt-2"
+          :percentage="dramaImportJob.status === 'succeeded' ? 100 : dramaImportJob.progress"
+          :status="dramaImportJob.status === 'failed' ? 'exception' : dramaImportJob.status === 'succeeded' ? 'success' : undefined"
+        />
+        <ul v-if="dramaImportJob.list?.length" class="mt-2 list-disc pl-5">
+          <li v-for="item in dramaImportJob.list" :key="item.id">
+            {{ item.title }} · 入库 {{ item.chapter_count }} 集
+            <span v-if="item.appended"> · 续传到 {{ item.id }}</span>
+            <span v-if="item.skipped_count"> · 跳过已就绪 {{ item.skipped_count }} 集</span>
+            · 转码就绪 {{ item.ready_count || 0 }}/{{ item.chapter_count }}
           </li>
         </ul>
-        <ul v-if="dramaImportResult.failed?.length" class="mt-2 list-disc pl-5 text-red-500">
-          <li v-for="(item, i) in dramaImportResult.failed" :key="i">
+        <ul v-if="dramaImportJob.failed?.length" class="mt-2 list-disc pl-5 text-red-500">
+          <li v-for="(item, i) in dramaImportJob.failed" :key="i">
             {{ item.title }}：{{ item.error }}
           </li>
         </ul>
       </div>
       <template #footer>
         <ElButton @click="dramaImportVisible = false">关闭</ElButton>
-        <ElButton type="primary" :loading="dramaImporting" :disabled="!!dramaImportError || !dramaImportFile" @click="submitDramaImport">
+        <ElButton
+          v-if="dramaImportJob && (dramaImportJob.status === 'failed' || dramaImportJob.status === 'canceled' || (dramaImportJob.status === 'import_done' && (dramaImportJob.failed_count || dramaImportJob.episode_failed)))"
+          @click="retryDramaImport"
+        >
+          重试失败步骤
+        </ElButton>
+        <ElButton type="primary" :loading="dramaImporting" :disabled="!!dramaImportError || !dramaImportFile || dramaUploadPhase === 'job'" @click="submitDramaImport">
           开始导入
         </ElButton>
       </template>
