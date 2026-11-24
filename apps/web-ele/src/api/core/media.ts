@@ -448,6 +448,10 @@ async function fetchMediaJSON<T>(
   timeoutMsg: string,
 ): Promise<T> {
   const ac = new AbortController();
+  if (init.signal) {
+    if (init.signal.aborted) ac.abort();
+    else init.signal.addEventListener("abort", () => ac.abort(), { once: true });
+  }
   const timer = window.setTimeout(() => ac.abort(), (timeoutSec > 0 ? timeoutSec : 600) * 1000);
   let res: Response | undefined;
   let text = "";
@@ -495,10 +499,60 @@ export function getDramaUploadApi(id: string) {
   return mediaClient.get<MediaApi.DramaUploadSession>(`/admin/dramas/uploads/${id}`);
 }
 
+export const DRAMA_COMPLETE_QUERY_ONLY =
+  "完成导入任务的结果未知，已保留原会话并改为只查询核对，请不要再次提交完成或新建上传";
+
+export class DramaCompleteUnknownError extends Error {
+  readonly queryOnly = true as const;
+  sessionId: string;
+  constructor(sessionId: string, message = DRAMA_COMPLETE_QUERY_ONLY) {
+    super(message);
+    this.name = "DramaCompleteUnknownError";
+    this.sessionId = sessionId;
+  }
+}
+
+export function isDramaCompleteQueryOnly(err: unknown): boolean {
+  return (
+    (err instanceof DramaCompleteUnknownError) ||
+    (err instanceof Error && (err.message.includes("只查询核对") || (err.message.includes("结果未知") && err.message.includes("不要新建上传"))))
+  );
+}
+
+export type DramaUploadProgress = {
+  uploadedBytes: number;
+  total: number;
+  phase: "upload" | "complete";
+  sessionId: string;
+  uploadedParts?: number;
+  partCount?: number;
+  expiresAt?: string;
+  completePending?: boolean;
+};
+
+export async function queryDramaUploadJob(sessionId: string): Promise<{
+  upload_id: string;
+  job_id: string;
+  status: string;
+  session_id: string;
+  recovered: true;
+} | null> {
+  const sess = await getDramaUploadApi(sessionId);
+  if (!sess?.job_id) return null;
+  return {
+    upload_id: sess.id,
+    job_id: sess.job_id,
+    status: sess.status,
+    session_id: sess.id,
+    recovered: true,
+  };
+}
+
 export async function completeDramaUploadApi(
   id: string,
   body: { plan?: unknown; target_id?: string },
   timeoutSec = 600,
+  signal?: AbortSignal,
 ) {
   return fetchMediaJSON<{ upload_id: string; job_id: string; status: string }>(
     `${mediaBaseURL}/admin/dramas/uploads/${id}/complete`,
@@ -506,6 +560,7 @@ export async function completeDramaUploadApi(
       method: "POST",
       headers: { "X-Admin-Token": mediaAdminToken, "Content-Type": "application/json" },
       body: JSON.stringify(body ?? {}),
+      signal,
     },
     timeoutSec,
     `完成导入任务超时（超过 ${timeoutSec} 秒），服务端结果未知，已保留原会话，请先核对不要新建上传`,
@@ -535,6 +590,7 @@ export async function putDramaUploadPartApi(
   n: number,
   blob: Blob,
   timeoutSec = 600,
+  signal?: AbortSignal,
 ) {
   return fetchMediaJSON(
     `${mediaBaseURL}/admin/dramas/uploads/${id}/parts/${n}`,
@@ -542,6 +598,7 @@ export async function putDramaUploadPartApi(
       method: "PUT",
       headers: { "X-Admin-Token": mediaAdminToken },
       body: blob,
+      signal,
     },
     timeoutSec,
     `分片上传超时（超过 ${timeoutSec} 秒），结果可能部分完成，请刷新核对后再决定重试`,
@@ -552,8 +609,13 @@ export async function putMediaFileWithTimeout(
   uploadUrl: string,
   file: Blob,
   timeoutSec = 600,
+  signal?: AbortSignal,
 ) {
   const ac = new AbortController();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener("abort", () => ac.abort(), { once: true });
+  }
   const timer = window.setTimeout(() => ac.abort(), (timeoutSec > 0 ? timeoutSec : 600) * 1000);
   try {
     const res = await fetch(uploadUrl, { method: "PUT", body: file, signal: ac.signal });
@@ -580,15 +642,10 @@ export async function uploadDramaZipAndEnqueue(
     limits?: MediaApi.DramaImportLimits;
     sessionId?: string;
     identity?: { filename: string; total_size: number; last_modified: number; digest: string };
-    onProgress?: (p: {
-      uploadedBytes: number;
-      total: number;
-      phase: "upload" | "complete";
-      sessionId: string;
-      uploadedParts?: number;
-      partCount?: number;
-      expiresAt?: string;
-    }) => void;
+    completePending?: boolean;
+    signal?: AbortSignal;
+    onBeforeComplete?: () => void;
+    onProgress?: (p: DramaUploadProgress) => void;
   },
 ): Promise<{
   upload_id: string;
@@ -608,7 +665,7 @@ export async function uploadDramaZipAndEnqueue(
     sessionId: string,
     uploadedBytes: number,
     phase: "upload" | "complete",
-    extra?: { uploadedParts?: number; partCount?: number; expiresAt?: string },
+    extra?: { uploadedParts?: number; partCount?: number; expiresAt?: string; completePending?: boolean },
   ) => {
     opts.onProgress?.({
       uploadedBytes,
@@ -618,6 +675,7 @@ export async function uploadDramaZipAndEnqueue(
       uploadedParts: extra?.uploadedParts,
       partCount: extra?.partCount,
       expiresAt: extra?.expiresAt,
+      completePending: extra?.completePending,
     });
   };
 
@@ -645,10 +703,12 @@ export async function uploadDramaZipAndEnqueue(
     }
   };
 
+  if (opts.completePending && !opts.sessionId) {
+    throw new Error("完成结果未知，缺少原会话，不能新建上传");
+  }
   let sessionId = opts.sessionId || "";
   if (sessionId) {
     const existing = await getDramaUploadApi(sessionId);
-    assertSessionFile(existing);
     if (existing.job_id) {
       emit(existing.id, file.size, "complete", {
         uploadedParts: (existing.parts || []).filter((p) => p.done).length,
@@ -663,6 +723,10 @@ export async function uploadDramaZipAndEnqueue(
         recovered: true,
       };
     }
+    if (opts.completePending) {
+      throw new DramaCompleteUnknownError(existing.id);
+    }
+    assertSessionFile(existing);
   }
   if (!sessionId) {
     const created = await createDramaUploadApi({ filename: file.name, total_size: file.size });
@@ -703,9 +767,9 @@ export async function uploadDramaZipAndEnqueue(
     }
     const blob = file.slice(part.offset, part.offset + part.size);
     if (part.mode === "presign" && part.url) {
-      await putMediaFileWithTimeout(part.url, blob, timeoutSec);
+      await putMediaFileWithTimeout(part.url, blob, timeoutSec, opts.signal);
     } else {
-      await putDramaUploadPartApi(sess.id, part.n, blob, timeoutSec);
+      await putDramaUploadPartApi(sess.id, part.n, blob, timeoutSec, opts.signal);
     }
     uploaded += part.size;
     emit(sess.id, uploaded, "upload", {
@@ -719,33 +783,73 @@ export async function uploadDramaZipAndEnqueue(
     partCount: sess.part_count,
     expiresAt: sess.expires_at,
   });
+  if (opts.signal?.aborted) {
+    throw new Error("已终止本次上传");
+  }
+  const pendingMark = () => {
+    emit(sess.id, file.size, "complete", {
+      uploadedParts: sess.part_count,
+      partCount: sess.part_count,
+      expiresAt: sess.expires_at,
+      completePending: true,
+    });
+    opts.onBeforeComplete?.();
+  };
+  if (opts.completePending) {
+    try {
+      const again = await getDramaUploadApi(sess.id);
+      if (again.job_id) {
+        return {
+          upload_id: again.id,
+          job_id: again.job_id,
+          status: again.status,
+          session_id: again.id,
+          recovered: true,
+        };
+      }
+    } catch {
+      /* GET 失败也不得据此再 POST complete */
+    }
+    throw new DramaCompleteUnknownError(sess.id);
+  }
+  pendingMark();
   try {
     const done = await completeDramaUploadApi(
       sess.id,
       { plan: opts.plan, target_id: opts.targetId },
       timeoutSec,
+      opts.signal,
     );
     return { ...done, session_id: sess.id };
   } catch (e) {
-    const again = await getDramaUploadApi(sess.id).catch(() => null);
-    if (again?.job_id) {
-      return {
-        upload_id: again.id,
-        job_id: again.job_id,
-        status: again.status,
-        session_id: again.id,
-        recovered: true,
-      };
+    if (opts.signal?.aborted && !(e instanceof DramaCompleteUnknownError)) {
+      // 若已发出或已标记 pending，中止也按结果未知、只查询处理
+      throw new DramaCompleteUnknownError(sess.id);
     }
-    const hint = "完成导入任务的结果未知，已核对并保留原会话，请稍后重试同一会话，不要新建上传";
-    if (e instanceof Error) {
-      const unknown =
-        e.message.includes("结果未知") ||
-        e.message.includes("完成导入任务超时") ||
-        /Failed to fetch|NetworkError/i.test(e.message);
-      throw new Error(unknown ? hint : e.message);
+    const definite =
+      e instanceof Error &&
+      !isDramaCompleteQueryOnly(e) &&
+      !e.message.includes("完成导入任务超时") &&
+      !e.message.includes("结果未知") &&
+      !/Failed to fetch|NetworkError/i.test(e.message);
+    if (definite) {
+      throw e;
     }
-    throw new Error(hint);
+    try {
+      const again = await getDramaUploadApi(sess.id);
+      if (again?.job_id) {
+        return {
+          upload_id: again.id,
+          job_id: again.job_id,
+          status: again.status,
+          session_id: again.id,
+          recovered: true,
+        };
+      }
+    } catch {
+      /* GET 失败不能推断未提交 */
+    }
+    throw new DramaCompleteUnknownError(sess.id);
   }
 }
 

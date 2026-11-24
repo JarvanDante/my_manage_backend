@@ -1,4 +1,4 @@
-/** 短剧分片上传中断恢复：只持久化会话身份，不保存 token 或签名 URL。 */
+/** 短剧分片上传中断恢复：只持久化会话身份与 complete 待核对标记，不保存 token 或签名 URL。 */
 
 export const DRAMA_UPLOAD_RESUME_KEY = "paas.media.dramaUpload.resume.v1";
 
@@ -17,6 +17,8 @@ export interface DramaUploadResume extends DramaFileIdentity {
   uploaded_parts?: number;
   part_count?: number;
   saved_at: number;
+  generation?: number;
+  complete_pending?: boolean;
 }
 
 const EDGE = 65536;
@@ -35,7 +37,7 @@ export async function edgeDigest(file: File): Promise<string> {
   const lastStart = file.size > EDGE ? file.size - EDGE : 0;
   const first = new Uint8Array(await file.slice(0, firstLen).arrayBuffer());
   const last =
-    lastStart > 0 && lastStart !== 0 ? new Uint8Array(await file.slice(lastStart).arrayBuffer()) : first;
+    lastStart > 0 ? new Uint8Array(await file.slice(lastStart).arrayBuffer()) : first;
   const packed = new Uint8Array(16 + first.length + last.length);
   const view = new DataView(packed.buffer);
   view.setUint32(0, file.size % 0x100000000, true);
@@ -92,9 +94,13 @@ export function sessionMatchesFile(
 export function isUnknownCompleteError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   if (!msg) return false;
-  if (msg.includes("结果未知") || msg.includes("完成导入任务超时")) return true;
+  if (msg.includes("结果未知") || msg.includes("完成导入任务超时") || msg.includes("只查询核对")) return true;
   if (/Failed to fetch|NetworkError|network/i.test(msg) && /complete|完成/.test(msg)) return true;
   return false;
+}
+
+export function shouldKeepExpiredResume(p: Partial<DramaUploadResume>): boolean {
+  return Boolean(p.complete_pending || p.job_id);
 }
 
 export function loadDramaUploadResume(): DramaUploadResume | null {
@@ -103,45 +109,41 @@ export function loadDramaUploadResume(): DramaUploadResume | null {
     if (!raw) return null;
     const p = JSON.parse(raw) as Partial<DramaUploadResume>;
     if (!p || typeof p !== "object" || !p.session_id || !p.filename || !p.total_size) return null;
-    if (p.expires_at) {
+    if (p.expires_at && !shouldKeepExpiredResume(p)) {
       const exp = Date.parse(p.expires_at);
       if (Number.isFinite(exp) && exp <= Date.now()) {
         clearDramaUploadResume();
         return null;
       }
     }
-    return {
-      session_id: String(p.session_id),
-      filename: String(p.filename),
-      total_size: Number(p.total_size),
-      last_modified: Number(p.last_modified) || 0,
-      digest: String(p.digest || ""),
-      job_id: p.job_id ? String(p.job_id) : undefined,
-      status: p.status ? String(p.status) : undefined,
-      expires_at: p.expires_at ? String(p.expires_at) : undefined,
-      uploaded_parts: typeof p.uploaded_parts === "number" ? p.uploaded_parts : undefined,
-      part_count: typeof p.part_count === "number" ? p.part_count : undefined,
-      saved_at: Number(p.saved_at) || Date.now(),
-    };
+    return sanitizeDramaUploadResume(p);
   } catch {
     return null;
   }
 }
 
-export function saveDramaUploadResume(input: DramaUploadResume): void {
-  const clean: DramaUploadResume = {
-    session_id: input.session_id,
-    filename: input.filename,
-    total_size: input.total_size,
-    last_modified: input.last_modified || 0,
-    digest: input.digest || "",
-    job_id: input.job_id || undefined,
-    status: input.status || undefined,
-    expires_at: input.expires_at || undefined,
-    uploaded_parts: input.uploaded_parts,
-    part_count: input.part_count,
-    saved_at: Date.now(),
+export function sanitizeDramaUploadResume(p: Partial<DramaUploadResume>): DramaUploadResume | null {
+  if (!p || !p.session_id || !p.filename || !p.total_size) return null;
+  return {
+    session_id: String(p.session_id),
+    filename: String(p.filename),
+    total_size: Number(p.total_size),
+    last_modified: Number(p.last_modified) || 0,
+    digest: String(p.digest || ""),
+    job_id: p.job_id ? String(p.job_id) : undefined,
+    status: p.status ? String(p.status) : undefined,
+    expires_at: p.expires_at ? String(p.expires_at) : undefined,
+    uploaded_parts: typeof p.uploaded_parts === "number" ? p.uploaded_parts : undefined,
+    part_count: typeof p.part_count === "number" ? p.part_count : undefined,
+    saved_at: Number(p.saved_at) || Date.now(),
+    generation: typeof p.generation === "number" ? p.generation : undefined,
+    complete_pending: p.complete_pending ? true : undefined,
   };
+}
+
+export function saveDramaUploadResume(input: DramaUploadResume): void {
+  const clean = sanitizeDramaUploadResume(input);
+  if (!clean) return;
   try {
     localStorage.setItem(DRAMA_UPLOAD_RESUME_KEY, JSON.stringify(clean));
   } catch {
@@ -162,6 +164,9 @@ export function resumeHint(r: DramaUploadResume): string {
     r.part_count && r.part_count > 0
       ? `已记录 ${r.uploaded_parts ?? 0}/${r.part_count} 个分片`
       : "已记录上传会话";
+  if (r.complete_pending && !r.job_id) {
+    return `原会话「${r.filename}」完成结果未知。将只核对是否已关联导入任务，不会再次提交完成或新建上传。`;
+  }
   if (r.job_id) {
     return `发现原会话已关联导入任务 ${r.job_id}（${r.filename}）。将先核对该任务，不会自动新建上传。`;
   }
