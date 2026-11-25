@@ -2,6 +2,7 @@ FROM nginx:1.27-alpine
 
 # 直接使用已打包产物（不在镜像内构建）
 RUN apk add --no-cache unzip
+COPY scripts/deploy/web-ele.conf /etc/nginx/conf.d/default.conf
 COPY apps/web-ele/dist.zip /tmp/dist.zip
 RUN rm -rf /usr/share/nginx/html/* \
   && unzip -q /tmp/dist.zip -d /usr/share/nginx/html \
