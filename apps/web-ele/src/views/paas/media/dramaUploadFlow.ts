@@ -48,6 +48,7 @@ export interface DramaUploadFlowState {
 export interface DramaUploadFlowSubmitOpts {
   file?: File | null;
   plan?: unknown;
+  planError?: string;
   targetId?: string;
   limits?: MediaApi.DramaImportLimits;
   upload?: typeof uploadDramaZipAndEnqueue;
@@ -447,9 +448,12 @@ export function createDramaUploadFlow() {
       }
       if (probe.kind !== "session") throw new DramaCompleteUnknownError(sessionId);
       // uploading 或 completed 无 job：服务端按会话幂等，可用原计划安全重提补建任务
-      const plan = opts.plan ?? state.resume?.plan;
+      // 落盘的原计划优先，界面计划仅在落盘缺失且已通过提交校验时兜底
+      const plan = state.resume?.plan ?? opts.plan;
       if (plan === undefined) {
-        const msg = "完成结果未知且缺少原导入计划，请重新选择原 zip 并确认后再核对";
+        const msg = opts.planError
+          ? `完成结果未知且缺少原导入计划：${opts.planError}`
+          : "完成结果未知且缺少原导入计划，请重新选择原 zip 并确认后再核对";
         state.error = msg;
         notify();
         throw new DramaCompleteUnknownError(sessionId, msg);

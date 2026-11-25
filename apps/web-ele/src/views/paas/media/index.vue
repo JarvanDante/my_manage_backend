@@ -830,6 +830,30 @@ async function onDramaZipChange(file: { raw?: File }) {
   }
 }
 
+// 与正常提交相同的分组校验，返回首条错误
+function dramaGroupsError(): string {
+  const needs = dramaImportGroups.value.some((g) => g.needsConfirm);
+  if (needs && !dramaImportConfirmed.value) return "存在需确认项，请核对集号和封面后再勾选确认";
+  for (const g of dramaImportGroups.value) {
+    if (!g.title.trim()) return "短剧标题不能为空";
+    const seen = new Set<number>();
+    for (const v of g.videos) {
+      if (!v.hasSeq || v.seq < 1) return `「${g.title}」还有未确认的集号`;
+      if (seen.has(v.seq)) return `「${g.title}」集号 ${v.seq} 重复`;
+      seen.add(v.seq);
+    }
+  }
+  return "";
+}
+
+// 核对重提时界面计划需已勾选确认并通过分组校验，否则不提供
+function dramaQueryPlan(): { plan?: unknown; planError?: string } {
+  if (!dramaImportGroups.value.length) return {};
+  if (!dramaImportConfirmed.value) return { planError: "请先核对集号、封面和入库目标并勾选确认" };
+  const err = dramaGroupsError();
+  return err ? { planError: err } : { plan: buildImportPlan(dramaImportGroups.value) };
+}
+
 async function submitDramaImport() {
   const lifecycle = dramaFlow.state.lifecycle;
   if (dramaFlow.isQueryOnly()) {
@@ -838,7 +862,7 @@ async function submitDramaImport() {
     try {
       const done = await dramaFlow.submit({
         file: dramaImportFile.value,
-        plan: dramaImportGroups.value.length ? buildImportPlan(dramaImportGroups.value) : undefined,
+        ...dramaQueryPlan(),
         limits: dramaImportLimits.value || defaultDramaImportLimits,
       });
       if (lifecycle !== dramaFlow.state.lifecycle) return;
@@ -859,28 +883,10 @@ async function submitDramaImport() {
     ElMessage.warning(dramaImportError.value);
     return;
   }
-  const needs = dramaImportGroups.value.some((g) => g.needsConfirm);
-  if (needs && !dramaImportConfirmed.value) {
-    ElMessage.warning("存在需确认项，请核对集号和封面后再勾选确认");
+  const groupsError = dramaGroupsError();
+  if (groupsError) {
+    ElMessage.warning(groupsError);
     return;
-  }
-  for (const g of dramaImportGroups.value) {
-    if (!g.title.trim()) {
-      ElMessage.warning("短剧标题不能为空");
-      return;
-    }
-    const seen = new Set<number>();
-    for (const v of g.videos) {
-      if (!v.hasSeq || v.seq < 1) {
-        ElMessage.warning(`「${g.title}」还有未确认的集号`);
-        return;
-      }
-      if (seen.has(v.seq)) {
-        ElMessage.warning(`「${g.title}」集号 ${v.seq} 重复`);
-        return;
-      }
-      seen.add(v.seq);
-    }
   }
   dramaImporting.value = true;
   dramaUploadPhase.value = "upload";
