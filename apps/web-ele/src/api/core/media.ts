@@ -467,9 +467,15 @@ export function isTransportLikeError(err: unknown): boolean {
   return false;
 }
 
+// my_media 业务拒绝为 HTTP200+{code:400}；无码错误 code=50 及 5xx 仍算未知
 export function isDramaCompleteBusinessError(err: unknown): boolean {
+  if (err && typeof err === "object" && !(err instanceof Error)) {
+    const e = err as { code?: unknown; message?: unknown };
+    return e.code === 400 && typeof e.message === "string";
+  }
   if (!(err instanceof MediaHttpError)) return false;
   if (!err.structured) return false;
+  if (err.status >= 200 && err.status < 300) return err.code === 400;
   if (err.status === 408 || err.status === 429) return false;
   if (err.status < 400 || err.status >= 500) return false;
   return err.code !== undefined && err.code !== 0;
@@ -604,8 +610,8 @@ export function isDramaUploadNotFound(err: unknown): boolean {
 
 export type DramaUploadProbe =
   | { kind: "job"; job: { upload_id: string; job_id: string; status: string; session_id: string; recovered: true } }
-  | { kind: "gone"; reason: "not_found" | "aborted" }
-  | { kind: "abortable" }
+  | { kind: "not_found" }
+  | { kind: "session"; status: string }
   | { kind: "unknown" };
 
 export async function probeDramaUploadSession(sessionId: string): Promise<DramaUploadProbe> {
@@ -613,7 +619,7 @@ export async function probeDramaUploadSession(sessionId: string): Promise<DramaU
   try {
     sess = await getDramaUploadApi(sessionId);
   } catch (e) {
-    return isDramaUploadNotFound(e) ? { kind: "gone", reason: "not_found" } : { kind: "unknown" };
+    return isDramaUploadNotFound(e) ? { kind: "not_found" } : { kind: "unknown" };
   }
   if (!sess || typeof sess !== "object" || sess.id !== sessionId) return { kind: "unknown" };
   if (sess.job_id) {
@@ -622,19 +628,7 @@ export async function probeDramaUploadSession(sessionId: string): Promise<DramaU
       job: { upload_id: sess.id, job_id: sess.job_id, status: sess.status, session_id: sess.id, recovered: true },
     };
   }
-  if (sess.status === "aborted") return { kind: "gone", reason: "aborted" };
-  if (sess.status === "uploading") return { kind: "abortable" };
-  return { kind: "unknown" };
-}
-
-// 中止后必须再 GET 确认已取消且无 job 才算成功，abort 自身的成败不作为依据
-export async function abortDramaUploadConfirmed(sessionId: string): Promise<DramaUploadProbe> {
-  try {
-    await abortDramaUploadApi(sessionId);
-  } catch {
-    /* 以随后的 GET 结果为准 */
-  }
-  return probeDramaUploadSession(sessionId);
+  return { kind: "session", status: String(sess.status || "") };
 }
 
 export async function completeDramaUploadApi(

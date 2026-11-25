@@ -12,7 +12,6 @@ import {
 
 import {
   DramaCompleteUnknownError,
-  abortDramaUploadConfirmed,
   classifyDramaCompleteFailure,
   isDramaCompleteQueryOnly,
   probeDramaUploadSession,
@@ -34,7 +33,7 @@ export interface DramaUploadFlowState {
   resume: DramaUploadResume | null;
   error: string;
   persistError: string;
-  queryExit: "" | "abortable" | "gone";
+  queryExit: "" | "gone";
   phase: DramaUploadPhase;
   percent: number;
   jobId: string;
@@ -135,6 +134,7 @@ export function createDramaUploadFlow() {
   };
 
   let op: BoundOp | null = null;
+  let discarding: Promise<{ ok: boolean; error: string }> | null = null;
 
   const canDiscard = () =>
     !state.active &&
@@ -315,20 +315,16 @@ export function createDramaUploadFlow() {
     return { accepted: true, error: "", identity: ident };
   }
 
-  // complete 未知时仅在服务端确认会话不存在/已取消且无 job（或中止后复核确认）才放行放弃
+  // complete 已发出且结果未知时，仅服务端确认“上传会话不存在”才放行放弃（aborted/uploading 均不放行）
   async function confirmQueryExit(): Promise<string> {
     const sessionId = state.sessionId;
     const lifecycle = state.lifecycle;
     if (!state.queryExit || !sessionId) {
-      return "完成结果未知，请先“核对原会话”；仅当服务端确认原会话不存在或已取消且无导入任务时才可放弃";
+      return "完成结果未知，请先“核对原会话”；仅当服务端确认原会话不存在时才可放弃";
     }
-    let probe = await probeDramaUploadSession(sessionId);
+    const probe = await probeDramaUploadSession(sessionId);
     if (lifecycle !== state.lifecycle || sessionId !== state.sessionId) return "会话已切换，请重新核对";
-    if (probe.kind === "abortable") {
-      probe = await abortDramaUploadConfirmed(sessionId);
-      if (lifecycle !== state.lifecycle || sessionId !== state.sessionId) return "会话已切换，请重新核对";
-    }
-    if (probe.kind === "gone") return "";
+    if (probe.kind === "not_found") return "";
     if (probe.kind === "job") {
       state.queryExit = "";
       persist({
@@ -340,10 +336,20 @@ export function createDramaUploadFlow() {
       return `原会话已关联导入任务 ${probe.job.job_id}，不能放弃`;
     }
     state.queryExit = "";
-    return "未能从服务端确认原会话已取消且无导入任务，已保留记录，请稍后再核对";
+    return "未能从服务端确认原会话不存在，已保留记录，请稍后再核对";
   }
 
-  async function discard(): Promise<{ ok: boolean; error: string }> {
+  function discard(): Promise<{ ok: boolean; error: string }> {
+    // 在途锁：重复点击复用同一次放弃
+    if (!discarding) {
+      discarding = doDiscard().finally(() => {
+        discarding = null;
+      });
+    }
+    return discarding;
+  }
+
+  async function doDiscard(): Promise<{ ok: boolean; error: string }> {
     if (state.completePending && !state.jobId) {
       const error = await confirmQueryExit();
       if (error) {
@@ -435,13 +441,8 @@ export function createDramaUploadFlow() {
         });
         return probe.job;
       }
-      state.queryExit = probe.kind === "unknown" ? "" : probe.kind;
-      const msg =
-        probe.kind === "gone"
-          ? "服务端确认原会话不存在或已取消，且未创建导入任务；可点“放弃本次恢复”后重新上传"
-          : probe.kind === "abortable"
-            ? "原会话仍在上传中且未创建导入任务；可点“放弃本次恢复”中止原会话，服务端确认后再重新上传"
-            : undefined;
+      state.queryExit = probe.kind === "not_found" ? "gone" : "";
+      const msg = queryOnlyHint(probe);
       if (msg) {
         state.error = msg;
         notify();
@@ -559,6 +560,20 @@ export function createDramaUploadFlow() {
     })();
     op = { generation: bound.generation, lifecycle: boundLifecycle, identity: bound.identity, abort, done: run };
     return run;
+  }
+
+  function queryOnlyHint(probe: Awaited<ReturnType<typeof probeDramaUploadSession>>): string | undefined {
+    if (probe.kind === "not_found") {
+      return "服务端确认原会话不存在，且未创建导入任务；可点“放弃本次恢复”后重新上传";
+    }
+    if (probe.kind !== "session") return undefined;
+    if (probe.status === "completed") {
+      return "原会话已完成但未关联导入任务，结果需人工核对，请联系管理员处理，不要放弃或重新上传";
+    }
+    if (probe.status === "aborted") {
+      return "原会话显示已取消，但完成请求已发出且结果未知，暂不能放弃，请稍后再核对";
+    }
+    return "原会话仍在上传中且未关联导入任务，完成请求可能仍在服务端处理，请稍后再核对，不能放弃或新建上传";
   }
 
   function reset() {
