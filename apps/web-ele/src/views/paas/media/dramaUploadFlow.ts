@@ -12,9 +12,10 @@ import {
 
 import {
   DramaCompleteUnknownError,
+  abortDramaUploadConfirmed,
   classifyDramaCompleteFailure,
   isDramaCompleteQueryOnly,
-  queryDramaUploadJob,
+  probeDramaUploadSession,
   uploadDramaZipAndEnqueue,
   type DramaUploadProgress,
   type MediaApi,
@@ -32,6 +33,8 @@ export interface DramaUploadFlowState {
   sessionId: string;
   resume: DramaUploadResume | null;
   error: string;
+  persistError: string;
+  queryExit: "" | "abortable" | "gone";
   phase: DramaUploadPhase;
   percent: number;
   jobId: string;
@@ -102,6 +105,8 @@ export function createDramaUploadFlow() {
     sessionId: "",
     resume: null,
     error: "",
+    persistError: "",
+    queryExit: "",
     phase: "idle",
     percent: 0,
     jobId: "",
@@ -131,7 +136,11 @@ export function createDramaUploadFlow() {
 
   let op: BoundOp | null = null;
 
-  const canDiscard = () => !state.active && !state.completePending && !state.finalized && !!state.resume;
+  const canDiscard = () =>
+    !state.active &&
+    !state.finalized &&
+    !!state.resume &&
+    (!state.completePending || (!state.jobId && state.queryExit !== ""));
   const canSelectFile = () => !state.active;
   const isQueryOnly = () => state.completePending && !state.jobId;
 
@@ -147,6 +156,8 @@ export function createDramaUploadFlow() {
     state.jobId = "";
     state.jobStatus = "";
     state.error = "";
+    state.persistError = "";
+    state.queryExit = "";
     state.phase = "idle";
     state.percent = 0;
     state.expiresAt = "";
@@ -223,6 +234,7 @@ export function createDramaUploadFlow() {
   }
 
   function applyResume(r: DramaUploadResume | null) {
+    if (!r || r.session_id !== state.sessionId) state.queryExit = "";
     state.resume = r;
     if (!r) {
       state.sessionId = "";
@@ -303,12 +315,42 @@ export function createDramaUploadFlow() {
     return { accepted: true, error: "", identity: ident };
   }
 
+  // complete 未知时仅在服务端确认会话不存在/已取消且无 job（或中止后复核确认）才放行放弃
+  async function confirmQueryExit(): Promise<string> {
+    const sessionId = state.sessionId;
+    const lifecycle = state.lifecycle;
+    if (!state.queryExit || !sessionId) {
+      return "完成结果未知，请先“核对原会话”；仅当服务端确认原会话不存在或已取消且无导入任务时才可放弃";
+    }
+    let probe = await probeDramaUploadSession(sessionId);
+    if (lifecycle !== state.lifecycle || sessionId !== state.sessionId) return "会话已切换，请重新核对";
+    if (probe.kind === "abortable") {
+      probe = await abortDramaUploadConfirmed(sessionId);
+      if (lifecycle !== state.lifecycle || sessionId !== state.sessionId) return "会话已切换，请重新核对";
+    }
+    if (probe.kind === "gone") return "";
+    if (probe.kind === "job") {
+      state.queryExit = "";
+      persist({
+        session_id: probe.job.session_id,
+        job_id: probe.job.job_id,
+        status: probe.job.status,
+        complete_pending: false,
+      });
+      return `原会话已关联导入任务 ${probe.job.job_id}，不能放弃`;
+    }
+    state.queryExit = "";
+    return "未能从服务端确认原会话已取消且无导入任务，已保留记录，请稍后再核对";
+  }
+
   async function discard(): Promise<{ ok: boolean; error: string }> {
     if (state.completePending && !state.jobId) {
-      const error = "完成结果未知，正在核对原会话，不能放弃以免丢失待确认任务";
-      state.error = error;
-      notify();
-      return { ok: false, error };
+      const error = await confirmQueryExit();
+      if (error) {
+        state.error = error;
+        notify();
+        return { ok: false, error };
+      }
     }
     if (state.active && op) {
       const leaving = op;
@@ -362,6 +404,8 @@ export function createDramaUploadFlow() {
       throw new Error("该上传已完成，无需再次提交");
     }
     const upload = opts.upload || uploadDramaZipAndEnqueue;
+    // 落盘失败属可恢复错误，新一次提交重新尝试持久化
+    state.persistError = "";
     if (isQueryOnly()) {
       state.phase = "complete";
       notify();
@@ -378,22 +422,31 @@ export function createDramaUploadFlow() {
           throw new Error(mismatch);
         }
       }
-      try {
-        const got = await queryDramaUploadJob(state.sessionId);
-        if (got) {
-          persist({
-            session_id: got.session_id,
-            job_id: got.job_id,
-            status: got.status,
-            complete_pending: false,
-          });
-          return got;
-        }
-      } catch (e) {
-        if (e instanceof DramaCompleteUnknownError) throw e;
-        throw new DramaCompleteUnknownError(state.sessionId);
+      const sessionId = state.sessionId;
+      const probe = await probeDramaUploadSession(sessionId);
+      if (sessionId !== state.sessionId) throw new DramaCompleteUnknownError(sessionId);
+      if (probe.kind === "job") {
+        state.queryExit = "";
+        persist({
+          session_id: probe.job.session_id,
+          job_id: probe.job.job_id,
+          status: probe.job.status,
+          complete_pending: false,
+        });
+        return probe.job;
       }
-      throw new DramaCompleteUnknownError(state.sessionId);
+      state.queryExit = probe.kind === "unknown" ? "" : probe.kind;
+      const msg =
+        probe.kind === "gone"
+          ? "服务端确认原会话不存在或已取消，且未创建导入任务；可点“放弃本次恢复”后重新上传"
+          : probe.kind === "abortable"
+            ? "原会话仍在上传中且未创建导入任务；可点“放弃本次恢复”中止原会话，服务端确认后再重新上传"
+            : undefined;
+      if (msg) {
+        state.error = msg;
+        notify();
+      }
+      throw new DramaCompleteUnknownError(sessionId, msg);
     }
 
     const file = opts.file;
@@ -459,7 +512,7 @@ export function createDramaUploadFlow() {
             );
             if (!ok) {
               state.completePending = false;
-              state.error = "无法持久化完成待核对标记，已停止提交完成。请清理浏览器存储后重试同一会话，不要新建上传";
+              state.persistError = "无法持久化完成待核对标记，已停止提交完成。请清理浏览器存储后重试同一会话，不要新建上传";
               notify();
               return false;
             }

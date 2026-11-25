@@ -233,6 +233,9 @@ const dramaFlowActive = ref(false);
 const dramaQueryOnly = ref(false);
 const dramaCanDiscard = ref(false);
 const dramaQuerying = ref(false);
+const dramaPersistError = ref("");
+// 最近一次选中的 zip（含被拒的），放弃恢复后据此重新校验
+let dramaPickedRaw: File | null = null;
 
 function syncDramaFlow() {
   if (dramaFlow.state.lifecycle !== dramaViewLifecycle) {
@@ -247,6 +250,7 @@ function syncDramaFlow() {
   dramaUploadPhase.value = dramaFlow.state.phase;
   dramaUploadPercent.value = dramaFlow.state.percent;
   if (dramaFlow.state.error) dramaImportError.value = dramaFlow.state.error;
+  dramaPersistError.value = dramaFlow.state.persistError;
   dramaImporting.value = dramaFlow.state.active;
   dramaFlowActive.value = dramaFlow.state.active;
   dramaQueryOnly.value = dramaFlow.isQueryOnly();
@@ -747,10 +751,11 @@ async function discardDramaResume() {
   const result = await dramaFlow.discard();
   if (!result.ok) {
     ElMessage.warning(result.error);
+    if (dramaFlow.state.jobId && !dramaImportJob.value) startDramaJobPoll(dramaFlow.state.jobId);
     return;
   }
   dramaImportError.value = "";
-  const raw = dramaImportFile.value;
+  const raw = dramaImportFile.value || dramaPickedRaw;
   if (raw) {
     await onDramaZipChange({ raw });
   }
@@ -761,6 +766,7 @@ async function openDramaImport() {
   if (!opened.restoredActive) {
     stopDramaJobPoll();
     dramaImportFile.value = null;
+    dramaPickedRaw = null;
     dramaImportGroups.value = [];
     dramaImportError.value = dramaFlow.state.error;
     dramaImportJob.value = null;
@@ -789,6 +795,7 @@ async function onDramaZipChange(file: { raw?: File }) {
     ElMessage.warning("上传进行中，请等待当前会话结束后再选择文件");
     return;
   }
+  if (raw) dramaPickedRaw = raw;
   const result = await dramaFlow.selectFile(raw);
   // 被拒的文件不进入待提交状态，避免与原会话身份混用
   dramaImportFile.value = result.accepted ? raw : null;
@@ -1424,6 +1431,7 @@ onMounted(() => {
         <ElButton :disabled="!canReselectDramaZip()">选择 zip</ElButton>
       </ElUpload>
       <p v-if="dramaImportError" class="mt-3 text-sm text-red-500">{{ dramaImportError }}</p>
+      <p v-if="dramaPersistError" class="mt-3 text-sm text-amber-600">{{ dramaPersistError }}</p>
       <div v-if="dramaImportGroups.length" class="mt-4 space-y-4">
         <div v-for="(g, gi) in dramaImportGroups" :key="gi" class="rounded border p-3">
           <div class="mb-2 flex flex-wrap items-center gap-2">

@@ -595,6 +595,48 @@ export async function queryDramaUploadJob(sessionId: string): Promise<{
   };
 }
 
+// 仅 my_media 结构化返回 code=404「上传会话不存在」才算会话不存在，网络/5xx/HTML 一律未知
+export function isDramaUploadNotFound(err: unknown): boolean {
+  if (!err || typeof err !== "object" || err instanceof Error) return false;
+  const e = err as { code?: unknown; message?: unknown };
+  return e.code === 404 && typeof e.message === "string" && e.message.includes("上传会话不存在");
+}
+
+export type DramaUploadProbe =
+  | { kind: "job"; job: { upload_id: string; job_id: string; status: string; session_id: string; recovered: true } }
+  | { kind: "gone"; reason: "not_found" | "aborted" }
+  | { kind: "abortable" }
+  | { kind: "unknown" };
+
+export async function probeDramaUploadSession(sessionId: string): Promise<DramaUploadProbe> {
+  let sess: MediaApi.DramaUploadSession;
+  try {
+    sess = await getDramaUploadApi(sessionId);
+  } catch (e) {
+    return isDramaUploadNotFound(e) ? { kind: "gone", reason: "not_found" } : { kind: "unknown" };
+  }
+  if (!sess || typeof sess !== "object" || sess.id !== sessionId) return { kind: "unknown" };
+  if (sess.job_id) {
+    return {
+      kind: "job",
+      job: { upload_id: sess.id, job_id: sess.job_id, status: sess.status, session_id: sess.id, recovered: true },
+    };
+  }
+  if (sess.status === "aborted") return { kind: "gone", reason: "aborted" };
+  if (sess.status === "uploading") return { kind: "abortable" };
+  return { kind: "unknown" };
+}
+
+// 中止后必须再 GET 确认已取消且无 job 才算成功，abort 自身的成败不作为依据
+export async function abortDramaUploadConfirmed(sessionId: string): Promise<DramaUploadProbe> {
+  try {
+    await abortDramaUploadApi(sessionId);
+  } catch {
+    /* 以随后的 GET 结果为准 */
+  }
+  return probeDramaUploadSession(sessionId);
+}
+
 export async function completeDramaUploadApi(
   id: string,
   body: { plan?: unknown; target_id?: string },
