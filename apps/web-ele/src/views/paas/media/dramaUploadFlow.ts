@@ -12,7 +12,10 @@ import {
 
 import {
   DramaCompleteUnknownError,
+  DramaUploadTerminalError,
+  abortDramaUploadSafely,
   classifyDramaCompleteFailure,
+  completeDramaUploadIdempotent,
   isDramaCompleteQueryOnly,
   probeDramaUploadSession,
   uploadDramaZipAndEnqueue,
@@ -33,7 +36,6 @@ export interface DramaUploadFlowState {
   resume: DramaUploadResume | null;
   error: string;
   persistError: string;
-  queryExit: "" | "gone";
   phase: DramaUploadPhase;
   percent: number;
   jobId: string;
@@ -105,7 +107,6 @@ export function createDramaUploadFlow() {
     resume: null,
     error: "",
     persistError: "",
-    queryExit: "",
     phase: "idle",
     percent: 0,
     jobId: "",
@@ -136,11 +137,7 @@ export function createDramaUploadFlow() {
   let op: BoundOp | null = null;
   let discarding: Promise<{ ok: boolean; error: string }> | null = null;
 
-  const canDiscard = () =>
-    !state.active &&
-    !state.finalized &&
-    !!state.resume &&
-    (!state.completePending || (!state.jobId && state.queryExit !== ""));
+  const canDiscard = () => !state.active && !state.finalized && !!state.resume;
   const canSelectFile = () => !state.active;
   const isQueryOnly = () => state.completePending && !state.jobId;
 
@@ -157,7 +154,6 @@ export function createDramaUploadFlow() {
     state.jobStatus = "";
     state.error = "";
     state.persistError = "";
-    state.queryExit = "";
     state.phase = "idle";
     state.percent = 0;
     state.expiresAt = "";
@@ -198,6 +194,7 @@ export function createDramaUploadFlow() {
       saved_at: Date.now(),
       generation,
       complete_pending: completePending || undefined,
+      plan: completePending ? (patch.plan ?? prev?.plan) : undefined,
     };
     if (!next.job_id) delete next.job_id;
     const ok = saveDramaUploadResume(next);
@@ -234,7 +231,6 @@ export function createDramaUploadFlow() {
   }
 
   function applyResume(r: DramaUploadResume | null) {
-    if (!r || r.session_id !== state.sessionId) state.queryExit = "";
     state.resume = r;
     if (!r) {
       state.sessionId = "";
@@ -315,28 +311,35 @@ export function createDramaUploadFlow() {
     return { accepted: true, error: "", identity: ident };
   }
 
-  // complete 已发出且结果未知时，仅服务端确认“上传会话不存在”才放行放弃（aborted/uploading 均不放行）
-  async function confirmQueryExit(): Promise<string> {
+  // complete 结果未知时放弃前先核对：已取消/不存在直接放行，未建任务先取消会话（终态）再放行，已有任务则拒绝
+  async function confirmPendingExit(): Promise<string> {
     const sessionId = state.sessionId;
     const lifecycle = state.lifecycle;
-    if (!state.queryExit || !sessionId) {
-      return "完成结果未知，请先“核对原会话”；仅当服务端确认原会话不存在时才可放弃";
-    }
+    const switched = () => lifecycle !== state.lifecycle || sessionId !== state.sessionId;
+    if (!sessionId) return "";
     const probe = await probeDramaUploadSession(sessionId);
-    if (lifecycle !== state.lifecycle || sessionId !== state.sessionId) return "会话已切换，请重新核对";
-    if (probe.kind === "not_found") return "";
-    if (probe.kind === "job") {
-      state.queryExit = "";
-      persist({
-        session_id: probe.job.session_id,
-        job_id: probe.job.job_id,
-        status: probe.job.status,
-        complete_pending: false,
-      });
-      return `原会话已关联导入任务 ${probe.job.job_id}，不能放弃`;
+    if (switched()) return "会话已切换，请重新核对";
+    if (probe.kind === "not_found" || (probe.kind === "session" && probe.status === "aborted")) return "";
+    let job = probe.kind === "job" ? probe.job : null;
+    if (probe.kind === "session") {
+      const r = await abortDramaUploadSafely(sessionId);
+      if (switched()) return "会话已切换，请重新核对";
+      if (r.kind === "aborted") return "";
+      if (r.kind === "job") job = r.job;
     }
-    state.queryExit = "";
-    return "未能从服务端确认原会话不存在，已保留记录，请稍后再核对";
+    if (job && job.status === "aborted") return "";
+    if (job) {
+      persist({ session_id: job.session_id, job_id: job.job_id, status: job.status, complete_pending: false });
+      return `原会话已关联导入任务 ${job.job_id}，不能放弃`;
+    }
+    return "未能确认原会话已取消，已保留记录，请稍后再试";
+  }
+
+  // 服务端确认终态后开启新生命周期，允许重新选择文件新建上传
+  function terminate() {
+    beginNewLifecycle();
+    clearDramaUploadResume();
+    notify();
   }
 
   function discard(): Promise<{ ok: boolean; error: string }> {
@@ -351,7 +354,7 @@ export function createDramaUploadFlow() {
 
   async function doDiscard(): Promise<{ ok: boolean; error: string }> {
     if (state.completePending && !state.jobId) {
-      const error = await confirmQueryExit();
+      const error = await confirmPendingExit();
       if (error) {
         state.error = error;
         notify();
@@ -429,25 +432,44 @@ export function createDramaUploadFlow() {
         }
       }
       const sessionId = state.sessionId;
+      const lifecycle = state.lifecycle;
       const probe = await probeDramaUploadSession(sessionId);
       if (sessionId !== state.sessionId) throw new DramaCompleteUnknownError(sessionId);
+      const saveJob = (job: { session_id: string; job_id: string; status: string }) =>
+        persist({ session_id: job.session_id, job_id: job.job_id, status: job.status, complete_pending: false });
       if (probe.kind === "job") {
-        state.queryExit = "";
-        persist({
-          session_id: probe.job.session_id,
-          job_id: probe.job.job_id,
-          status: probe.job.status,
-          complete_pending: false,
-        });
+        saveJob(probe.job);
         return probe.job;
       }
-      state.queryExit = probe.kind === "not_found" ? "gone" : "";
-      const msg = queryOnlyHint(probe);
-      if (msg) {
+      if (probe.kind === "not_found" || (probe.kind === "session" && probe.status === "aborted")) {
+        terminate();
+        throw new DramaUploadTerminalError(sessionId, "原会话已取消或不存在（终态，不会再生成任务），请重新选择 zip 新建上传");
+      }
+      if (probe.kind !== "session") throw new DramaCompleteUnknownError(sessionId);
+      // uploading 或 completed 无 job：服务端按会话幂等，可用原计划安全重提补建任务
+      const plan = opts.plan ?? state.resume?.plan;
+      if (plan === undefined) {
+        const msg = "完成结果未知且缺少原导入计划，请重新选择原 zip 并确认后再核对";
         state.error = msg;
         notify();
+        throw new DramaCompleteUnknownError(sessionId, msg);
       }
-      throw new DramaCompleteUnknownError(sessionId, msg);
+      const timeoutSec = opts.limits?.import_timeout_sec && opts.limits.import_timeout_sec > 0
+        ? opts.limits.import_timeout_sec
+        : 600;
+      try {
+        const done = await completeDramaUploadIdempotent(sessionId, { plan, target_id: opts.targetId }, timeoutSec);
+        if (lifecycle === state.lifecycle && sessionId === state.sessionId) saveJob(done);
+        return done;
+      } catch (e) {
+        if (lifecycle === state.lifecycle && sessionId === state.sessionId) {
+          if (e instanceof DramaUploadTerminalError) terminate();
+          else if (!isDramaCompleteQueryOnly(e) && classifyDramaCompleteFailure(e) === "business") {
+            persist({ session_id: sessionId, complete_pending: false });
+          }
+        }
+        throw e;
+      }
     }
 
     const file = opts.file;
@@ -508,7 +530,7 @@ export function createDramaUploadFlow() {
           onBeforeComplete: () => {
             if (bound.generation !== state.generation) return false;
             const ok = persist(
-              { session_id: state.sessionId, complete_pending: true, status: "complete" },
+              { session_id: state.sessionId, complete_pending: true, status: "complete", plan: opts.plan },
               bound,
             );
             if (!ok) {
@@ -539,7 +561,9 @@ export function createDramaUploadFlow() {
         return done;
       } catch (e) {
         if (bound.generation === state.generation && boundLifecycle === state.lifecycle) {
-          if (!completeSent) {
+          if (e instanceof DramaUploadTerminalError) {
+            terminate();
+          } else if (!completeSent) {
             state.completePending = false;
           } else if (!isDramaCompleteQueryOnly(e) && classifyDramaCompleteFailure(e) === "business") {
             persist({ session_id: state.sessionId, complete_pending: false }, bound);
@@ -560,20 +584,6 @@ export function createDramaUploadFlow() {
     })();
     op = { generation: bound.generation, lifecycle: boundLifecycle, identity: bound.identity, abort, done: run };
     return run;
-  }
-
-  function queryOnlyHint(probe: Awaited<ReturnType<typeof probeDramaUploadSession>>): string | undefined {
-    if (probe.kind === "not_found") {
-      return "服务端确认原会话不存在，且未创建导入任务；可点“放弃本次恢复”后重新上传";
-    }
-    if (probe.kind !== "session") return undefined;
-    if (probe.status === "completed") {
-      return "原会话已完成但未关联导入任务，结果需人工核对，请联系管理员处理，不要放弃或重新上传";
-    }
-    if (probe.status === "aborted") {
-      return "原会话显示已取消，但完成请求已发出且结果未知，暂不能放弃，请稍后再核对";
-    }
-    return "原会话仍在上传中且未关联导入任务，完成请求可能仍在服务端处理，请稍后再核对，不能放弃或新建上传";
   }
 
   function reset() {

@@ -19,6 +19,7 @@ export interface DramaUploadResume extends DramaFileIdentity {
   saved_at: number;
   generation?: number;
   complete_pending?: boolean;
+  plan?: unknown;
 }
 
 const EDGE = 65536;
@@ -138,6 +139,7 @@ export function sanitizeDramaUploadResume(p: Partial<DramaUploadResume>): DramaU
     saved_at: Number(p.saved_at) || Date.now(),
     generation: typeof p.generation === "number" ? p.generation : undefined,
     complete_pending: p.complete_pending ? true : undefined,
+    plan: p.complete_pending && p.plan != null ? p.plan : undefined,
   };
 }
 
@@ -179,7 +181,7 @@ export function resumeHint(r: DramaUploadResume): string {
       ? `已记录 ${r.uploaded_parts ?? 0}/${r.part_count} 个分片`
       : "已记录上传会话";
   if (r.complete_pending && !r.job_id) {
-    return `原会话「${r.filename}」完成结果未知。将只核对是否已关联导入任务，不会再次提交完成或新建上传。`;
+    return `原会话「${r.filename}」完成结果未知。点“核对原会话”将查询并在安全时重新提交完成（服务端按会话幂等，不会重复建任务）；也可放弃，系统会先取消原会话。`;
   }
   if (r.job_id) {
     return `发现原会话已关联导入任务 ${r.job_id}（${r.filename}）。将先核对该任务，不会自动新建上传。`;

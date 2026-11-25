@@ -45,6 +45,9 @@ import {
   createMediaNovelChapterApi,
   deleteMediaAssetApi,
   deleteMediaComicChapterApi,
+  DRAMA_CODE_PACK_UNAVAILABLE,
+  DRAMA_CODE_UPLOAD_ABORTED,
+  dramaBusinessCode,
   getDramaImportJobApi,
   getDramaImportLimitsApi,
   getMediaAssetDetailApi,
@@ -917,6 +920,15 @@ async function retryDramaImport() {
     ElMessage.success("已提交重试");
     startDramaJobPoll(next.id, lifecycle);
   } catch (e: any) {
+    const code = dramaBusinessCode(e);
+    if (lifecycle === dramaFlow.state.lifecycle && (code === DRAMA_CODE_UPLOAD_ABORTED || code === DRAMA_CODE_PACK_UNAVAILABLE)) {
+      // 会话已取消或整包不可用：结束本次恢复记录，按原文件重新开始新上传
+      dramaFlow.finalize();
+      ElMessage.error(`${e?.message || "整包不可用"}，请重新选择 zip 新建上传`);
+      const raw = dramaImportFile.value || dramaPickedRaw;
+      if (raw) await onDramaZipChange({ raw });
+      return;
+    }
     ElMessage.error(e?.message || "重试失败");
   }
 }

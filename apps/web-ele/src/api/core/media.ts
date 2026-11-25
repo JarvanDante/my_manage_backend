@@ -467,18 +467,36 @@ export function isTransportLikeError(err: unknown): boolean {
   return false;
 }
 
-// my_media 业务拒绝为 HTTP200+{code:400}；无码错误 code=50 及 5xx 仍算未知
-export function isDramaCompleteBusinessError(err: unknown): boolean {
+export const DRAMA_CODE_UPLOAD_ABORTED = 40901;
+export const DRAMA_CODE_JOB_STARTED = 40902;
+export const DRAMA_CODE_UPLOAD_EXPIRED = 40903;
+export const DRAMA_CODE_PACK_UNAVAILABLE = 40904;
+const DRAMA_BUSINESS_CODES = new Set([
+  400,
+  DRAMA_CODE_UPLOAD_ABORTED,
+  DRAMA_CODE_JOB_STARTED,
+  DRAMA_CODE_UPLOAD_EXPIRED,
+  DRAMA_CODE_PACK_UNAVAILABLE,
+]);
+
+// my_media 业务拒绝为 HTTP200+{code:400/409xx}，返回其业务码；无码错误 code=50 及 5xx 仍算未知返回 undefined
+export function dramaBusinessCode(err: unknown): number | undefined {
   if (err && typeof err === "object" && !(err instanceof Error)) {
     const e = err as { code?: unknown; message?: unknown };
-    return e.code === 400 && typeof e.message === "string";
+    return typeof e.code === "number" && DRAMA_BUSINESS_CODES.has(e.code) && typeof e.message === "string"
+      ? e.code
+      : undefined;
   }
-  if (!(err instanceof MediaHttpError)) return false;
-  if (!err.structured) return false;
-  if (err.status >= 200 && err.status < 300) return err.code === 400;
-  if (err.status === 408 || err.status === 429) return false;
-  if (err.status < 400 || err.status >= 500) return false;
-  return err.code !== undefined && err.code !== 0;
+  if (!(err instanceof MediaHttpError)) return undefined;
+  if (!err.structured || err.code === undefined) return undefined;
+  if (err.status >= 200 && err.status < 300) return DRAMA_BUSINESS_CODES.has(err.code) ? err.code : undefined;
+  if (err.status === 408 || err.status === 429) return undefined;
+  if (err.status < 400 || err.status >= 500) return undefined;
+  return err.code !== 0 ? err.code : undefined;
+}
+
+export function isDramaCompleteBusinessError(err: unknown): boolean {
+  return dramaBusinessCode(err) !== undefined;
 }
 
 export function classifyDramaCompleteFailure(err: unknown): "business" | "unknown" {
@@ -631,6 +649,91 @@ export async function probeDramaUploadSession(sessionId: string): Promise<DramaU
   return { kind: "session", status: String(sess.status || "") };
 }
 
+// 服务端已确认会话取消（终态，之后不会再生成 job），可放弃并新建上传
+export class DramaUploadTerminalError extends Error {
+  sessionId: string;
+  constructor(sessionId: string, message = "上传会话已取消，请重新选择 zip 新建上传") {
+    super(message);
+    this.name = "DramaUploadTerminalError";
+    this.sessionId = sessionId;
+  }
+}
+
+export type DramaAbortResult =
+  | { kind: "aborted" }
+  | { kind: "job"; job: { upload_id: string; job_id: string; status: string; session_id: string; recovered: true } }
+  | { kind: "unknown" };
+
+function isAbortCleanupFailed(err: unknown): boolean {
+  if (!err || typeof err !== "object" || err instanceof Error) return false;
+  const e = err as { code?: unknown; message?: unknown };
+  return e.code === 50 && typeof e.message === "string" && e.message.includes("上传会话已取消");
+}
+
+// 取消会话：成功、已不存在或「已取消但清理失败」均为终态；40902 等其余情况以 GET 复核为准
+export async function abortDramaUploadSafely(sessionId: string): Promise<DramaAbortResult> {
+  try {
+    await abortDramaUploadApi(sessionId);
+    return { kind: "aborted" };
+  } catch (e) {
+    if (isDramaUploadNotFound(e)) return { kind: "aborted" };
+    if (isAbortCleanupFailed(e)) {
+      void abortDramaUploadApi(sessionId).catch(() => undefined);
+      return { kind: "aborted" };
+    }
+  }
+  const probe = await probeDramaUploadSession(sessionId);
+  if (probe.kind === "not_found") return { kind: "aborted" };
+  if (probe.kind === "session") return probe.status === "aborted" ? { kind: "aborted" } : { kind: "unknown" };
+  if (probe.kind === "job") return probe.job.status === "aborted" ? { kind: "aborted" } : probe;
+  return { kind: "unknown" };
+}
+
+export const DRAMA_COMPLETE_RETRY_DELAYS_MS = [1000, 3000];
+
+function waitMs(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { window.clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+// complete 服务端按 upload_id 幂等：结果未知时先 GET 核对再退避重提，40901/过期后确认取消转终态
+export async function completeDramaUploadIdempotent(
+  sessionId: string,
+  body: { plan?: unknown; target_id?: string },
+  timeoutSec = 600,
+  signal?: AbortSignal,
+): Promise<{ upload_id: string; job_id: string; status: string; session_id: string; recovered?: boolean }> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const done = await completeDramaUploadApi(sessionId, body, timeoutSec, signal);
+      return { ...done, session_id: sessionId };
+    } catch (e) {
+      if (signal?.aborted) throw new DramaCompleteUnknownError(sessionId);
+      const code = dramaBusinessCode(e);
+      if (code === DRAMA_CODE_UPLOAD_ABORTED) throw new DramaUploadTerminalError(sessionId);
+      if (code === DRAMA_CODE_UPLOAD_EXPIRED) {
+        const r = await abortDramaUploadSafely(sessionId);
+        if (r.kind === "job") return r.job;
+        if (r.kind === "aborted") {
+          throw new DramaUploadTerminalError(sessionId, "上传会话已过期并已取消，请重新选择 zip 新建上传");
+        }
+        throw new DramaCompleteUnknownError(sessionId);
+      }
+      if (code !== undefined) throw e;
+      const probe = await probeDramaUploadSession(sessionId);
+      if (probe.kind === "job") return probe.job;
+      if (probe.kind === "not_found" || (probe.kind === "session" && probe.status === "aborted")) {
+        throw new DramaUploadTerminalError(sessionId);
+      }
+      const delay = DRAMA_COMPLETE_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || signal?.aborted) throw new DramaCompleteUnknownError(sessionId);
+      await waitMs(delay, signal);
+    }
+  }
+}
+
 export async function completeDramaUploadApi(
   id: string,
   body: { plan?: unknown; target_id?: string },
@@ -764,7 +867,7 @@ export async function uploadDramaZipAndEnqueue(
 
   const assertSessionFile = (sess: MediaApi.DramaUploadSession) => {
     if (sess.status === "aborted") {
-      throw new Error("上传会话已取消，不能继续复用，请重新选择文件后新建上传");
+      throw new DramaUploadTerminalError(sess.id, "上传会话已取消，不能继续复用，请重新选择文件后新建上传");
     }
     if (sess.filename !== file.name || sess.total_size !== file.size) {
       throw new Error("当前文件与未完成会话不一致，不能复用该会话。请选择原来的 zip 或开始新的上传");
@@ -901,41 +1004,12 @@ export async function uploadDramaZipAndEnqueue(
     throw new DramaCompleteUnknownError(sess.id);
   }
   await pendingMark();
-  try {
-    const done = await completeDramaUploadApi(
-      sess.id,
-      { plan: opts.plan, target_id: opts.targetId },
-      timeoutSec,
-      opts.signal,
-    );
-    return { ...done, session_id: sess.id };
-  } catch (e) {
-    if (opts.signal?.aborted && !(e instanceof DramaCompleteUnknownError)) {
-      // 若已发出或已标记 pending，中止也按结果未知、只查询处理
-      throw new DramaCompleteUnknownError(sess.id);
-    }
-    if (e instanceof Error && e.message.includes("无法持久化完成待核对标记")) {
-      throw e;
-    }
-    if (classifyDramaCompleteFailure(e) === "business") {
-      throw e;
-    }
-    try {
-      const again = await getDramaUploadApi(sess.id);
-      if (again?.job_id) {
-        return {
-          upload_id: again.id,
-          job_id: again.job_id,
-          status: again.status,
-          session_id: again.id,
-          recovered: true,
-        };
-      }
-    } catch {
-      /* GET 失败不能推断未提交 */
-    }
-    throw new DramaCompleteUnknownError(sess.id);
-  }
+  return completeDramaUploadIdempotent(
+    sess.id,
+    { plan: opts.plan, target_id: opts.targetId },
+    timeoutSec,
+    opts.signal,
+  );
 }
 
 export function mediaApiConfigured() {
