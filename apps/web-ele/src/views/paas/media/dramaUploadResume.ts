@@ -141,13 +141,27 @@ export function sanitizeDramaUploadResume(p: Partial<DramaUploadResume>): DramaU
   };
 }
 
-export function saveDramaUploadResume(input: DramaUploadResume): void {
+export class DramaResumePersistError extends Error {
+  constructor(message = "无法持久化上传恢复信息") {
+    super(message);
+    this.name = "DramaResumePersistError";
+  }
+}
+
+export function saveDramaUploadResume(input: DramaUploadResume): boolean {
   const clean = sanitizeDramaUploadResume(input);
-  if (!clean) return;
+  if (!clean) return false;
   try {
-    localStorage.setItem(DRAMA_UPLOAD_RESUME_KEY, JSON.stringify(clean));
+    const raw = JSON.stringify(clean);
+    localStorage.setItem(DRAMA_UPLOAD_RESUME_KEY, raw);
+    const read = localStorage.getItem(DRAMA_UPLOAD_RESUME_KEY);
+    if (read !== raw) return false;
+    const loaded = sanitizeDramaUploadResume(JSON.parse(read) as Partial<DramaUploadResume>);
+    if (!loaded || loaded.session_id !== clean.session_id) return false;
+    if (Boolean(loaded.complete_pending) !== Boolean(clean.complete_pending)) return false;
+    return true;
   } catch {
-    /* 隐私模式等无法写入时忽略，不阻断上传 */
+    return false;
   }
 }
 

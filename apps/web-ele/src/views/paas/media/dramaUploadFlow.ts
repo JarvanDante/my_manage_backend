@@ -1,4 +1,4 @@
-/** 短剧上传恢复控制：持久化绑定不可变操作身份与 generation，过期回调不得改写。 */
+/** 短剧上传恢复控制：持久化必须落盘成功，生命周期与 job 回调隔离，进度即时通知视图。 */
 
 import {
   clearDramaUploadResume,
@@ -12,6 +12,7 @@ import {
 
 import {
   DramaCompleteUnknownError,
+  classifyDramaCompleteFailure,
   isDramaCompleteQueryOnly,
   queryDramaUploadJob,
   uploadDramaZipAndEnqueue,
@@ -22,6 +23,7 @@ import {
 export type DramaUploadPhase = "idle" | "upload" | "complete" | "job";
 
 export interface DramaUploadFlowState {
+  lifecycle: number;
   generation: number;
   active: boolean;
   finalized: boolean;
@@ -53,15 +55,45 @@ export interface DramaSelectResult {
   identity: DramaFileIdentity | null;
 }
 
+export interface DramaUploadView {
+  resume: { value: DramaUploadResume | null };
+  sessionId: { value: string };
+  identity: { value: DramaFileIdentity | null };
+  phase: { value: DramaUploadPhase };
+  percent: { value: number };
+  error?: { value: string };
+  importing?: { value: boolean };
+}
+
 type BoundOp = {
   generation: number;
+  lifecycle: number;
   identity: DramaFileIdentity;
   abort: AbortController;
   done: Promise<unknown>;
 };
 
+export function syncDramaUploadView(flow: { state: DramaUploadFlowState }, view: DramaUploadView) {
+  view.resume.value = flow.state.resume;
+  view.sessionId.value = flow.state.sessionId;
+  view.identity.value = flow.state.identity;
+  view.phase.value = flow.state.phase;
+  view.percent.value = flow.state.percent;
+  if (flow.state.error && view.error) view.error.value = flow.state.error;
+  if (view.importing) view.importing.value = flow.state.active;
+}
+
+export function bindDramaUploadView(
+  flow: { state: DramaUploadFlowState; subscribe: (fn: () => void) => () => void },
+  view: DramaUploadView,
+) {
+  const sync = () => syncDramaUploadView(flow, view);
+  return flow.subscribe(sync);
+}
+
 export function createDramaUploadFlow() {
   const state: DramaUploadFlowState = {
+    lifecycle: 0,
     generation: 0,
     active: false,
     finalized: false,
@@ -79,11 +111,49 @@ export function createDramaUploadFlow() {
     partCount: undefined,
   };
 
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    listeners.forEach((fn) => {
+      try {
+        fn();
+      } catch {
+        /* 视图同步失败不阻断上传 */
+      }
+    });
+  };
+  const subscribe = (fn: () => void) => {
+    listeners.add(fn);
+    fn();
+    return () => {
+      listeners.delete(fn);
+    };
+  };
+
   let op: BoundOp | null = null;
 
   const canDiscard = () => !state.active && !state.completePending && !state.finalized && !!state.resume;
   const canSelectFile = () => !state.active;
   const isQueryOnly = () => state.completePending && !state.jobId;
+
+  function beginNewLifecycle() {
+    state.lifecycle += 1;
+    state.generation += 1;
+    state.finalized = false;
+    state.completePending = false;
+    state.active = false;
+    state.identity = null;
+    state.sessionId = "";
+    state.resume = null;
+    state.jobId = "";
+    state.jobStatus = "";
+    state.error = "";
+    state.phase = "idle";
+    state.percent = 0;
+    state.expiresAt = "";
+    state.uploadedParts = undefined;
+    state.partCount = undefined;
+    notify();
+  }
 
   function persist(
     patch: Partial<DramaUploadResume> = {},
@@ -119,6 +189,12 @@ export function createDramaUploadFlow() {
       complete_pending: completePending || undefined,
     };
     if (!next.job_id) delete next.job_id;
+    const ok = saveDramaUploadResume(next);
+    if (!ok) {
+      if (next.complete_pending) state.completePending = false;
+      notify();
+      return false;
+    }
     state.resume = next;
     state.sessionId = next.session_id;
     state.completePending = Boolean(next.complete_pending);
@@ -126,11 +202,12 @@ export function createDramaUploadFlow() {
     if (next.job_id) state.jobId = next.job_id;
     if (typeof next.uploaded_parts === "number") state.uploadedParts = next.uploaded_parts;
     if (typeof next.part_count === "number") state.partCount = next.part_count;
-    saveDramaUploadResume(next);
+    notify();
     return true;
   }
 
-  function finalize() {
+  function finalize(fromJobId?: string) {
+    if (fromJobId && state.jobId && fromJobId !== state.jobId) return;
     state.finalized = true;
     state.completePending = false;
     state.active = false;
@@ -142,6 +219,7 @@ export function createDramaUploadFlow() {
     state.partCount = undefined;
     state.phase = state.phase === "job" ? "job" : "idle";
     clearDramaUploadResume();
+    notify();
   }
 
   function applyResume(r: DramaUploadResume | null) {
@@ -149,6 +227,13 @@ export function createDramaUploadFlow() {
     if (!r) {
       state.sessionId = "";
       state.completePending = false;
+      state.identity = null;
+      state.jobId = "";
+      state.jobStatus = "";
+      state.expiresAt = "";
+      state.uploadedParts = undefined;
+      state.partCount = undefined;
+      notify();
       return;
     }
     state.sessionId = r.session_id;
@@ -159,23 +244,29 @@ export function createDramaUploadFlow() {
       digest: r.digest,
     };
     state.jobId = r.job_id || "";
+    state.jobStatus = r.job_id ? state.jobStatus : "";
     state.completePending = Boolean(r.complete_pending) && !r.job_id;
     state.expiresAt = r.expires_at || "";
     state.uploadedParts = r.uploaded_parts;
     state.partCount = r.part_count;
     if (r.generation) state.generation = Math.max(state.generation, r.generation);
+    notify();
   }
 
   function open() {
     state.error = "";
     if (op && state.active) {
+      notify();
       return { restoredActive: true, resume: state.resume };
     }
-    state.finalized = false;
-    state.percent = 0;
-    if (!state.active) state.phase = "idle";
-    applyResume(loadDramaUploadResume());
-    return { restoredActive: false, resume: state.resume };
+    const resume = loadDramaUploadResume();
+    if (resume) {
+      state.finalized = false;
+      applyResume(resume);
+      return { restoredActive: false, resume };
+    }
+    beginNewLifecycle();
+    return { restoredActive: false, resume: null };
   }
 
   async function selectFile(file: File | null): Promise<DramaSelectResult> {
@@ -183,10 +274,13 @@ export function createDramaUploadFlow() {
     if (state.active) {
       const error = "上传进行中，请等待当前会话结束后再选择文件";
       state.error = error;
+      notify();
       return { accepted: false, error, identity: state.identity };
     }
     if (!file) {
-      applyResume(loadDramaUploadResume());
+      const resume = loadDramaUploadResume();
+      if (resume) applyResume(resume);
+      else applyResume(null);
       return { accepted: false, error: "", identity: state.identity };
     }
     const ident = await dramaFileIdentity(file);
@@ -200,13 +294,12 @@ export function createDramaUploadFlow() {
       }
       applyResume(resume);
       state.identity = ident;
+      notify();
       return { accepted: true, error: "", identity: ident };
     }
+    beginNewLifecycle();
     state.identity = ident;
-    state.sessionId = "";
-    state.jobId = "";
-    state.completePending = false;
-    state.phase = "idle";
+    notify();
     return { accepted: true, error: "", identity: ident };
   }
 
@@ -214,6 +307,7 @@ export function createDramaUploadFlow() {
     if (state.completePending && !state.jobId) {
       const error = "完成结果未知，正在核对原会话，不能放弃以免丢失待确认任务";
       state.error = error;
+      notify();
       return { ok: false, error };
     }
     if (state.active && op) {
@@ -224,20 +318,9 @@ export function createDramaUploadFlow() {
       if (op === leaving) op = null;
       state.active = false;
     }
-    state.generation += 1;
-    state.identity = null;
-    state.sessionId = "";
-    state.jobId = "";
-    state.completePending = false;
-    state.finalized = false;
-    state.resume = null;
-    state.error = "";
-    state.phase = "idle";
-    state.percent = 0;
-    state.expiresAt = "";
-    state.uploadedParts = undefined;
-    state.partCount = undefined;
+    beginNewLifecycle();
     clearDramaUploadResume();
+    notify();
     return { ok: true, error: "" };
   }
 
@@ -245,18 +328,30 @@ export function createDramaUploadFlow() {
     if (!state.finalized && state.identity && state.sessionId) {
       persist({}, { generation: state.generation, identity: state.identity });
     }
+    notify();
   }
 
-  function onJobStatus(job: { id: string; status: string }) {
+  function watchJob(id: string, meta?: { lifecycle?: number }) {
+    if (!id) return false;
+    if (meta?.lifecycle !== undefined && meta.lifecycle !== state.lifecycle) return false;
+    state.jobId = id;
+    state.phase = "job";
+    notify();
+    return true;
+  }
+
+  function onJobStatus(job: { id: string; status: string }, meta?: { lifecycle?: number }) {
     if (!job?.id) return;
-    state.jobId = job.id;
+    if (meta?.lifecycle !== undefined && meta.lifecycle !== state.lifecycle) return;
+    if (!state.jobId || job.id !== state.jobId) return;
     state.jobStatus = job.status;
     if (job.status === "succeeded") {
-      finalize();
+      finalize(job.id);
       return;
     }
     if (state.finalized) return;
     persist({ job_id: job.id, status: job.status, complete_pending: false });
+    notify();
   }
 
   async function submit(opts: DramaUploadFlowSubmitOpts) {
@@ -269,6 +364,7 @@ export function createDramaUploadFlow() {
     const upload = opts.upload || uploadDramaZipAndEnqueue;
     if (isQueryOnly()) {
       state.phase = "complete";
+      notify();
       if (!state.sessionId) {
         throw new Error("完成结果未知，缺少原会话，不能新建上传");
       }
@@ -278,6 +374,7 @@ export function createDramaUploadFlow() {
         const mismatch = fileMatchesIdentity(opts.file, expected, ident.digest);
         if (mismatch) {
           state.error = mismatch;
+          notify();
           throw new Error(mismatch);
         }
       }
@@ -310,6 +407,7 @@ export function createDramaUploadFlow() {
       const mismatch = fileMatchesIdentity(file, state.resume, ident.digest);
       if (mismatch) {
         state.error = mismatch;
+        notify();
         throw new Error(mismatch);
       }
     }
@@ -317,10 +415,14 @@ export function createDramaUploadFlow() {
     state.generation += 1;
     const bound = { generation: state.generation, identity: { ...ident } };
     const abort = new AbortController();
+    const boundLifecycle = state.lifecycle;
+    // 仅 pending 落盘成功并放行 POST 后才视为 complete 已发出
+    let completeSent = false;
     state.active = true;
     state.finalized = false;
     state.phase = "upload";
     state.error = "";
+    notify();
     const run = (async () => {
       try {
         const done = await upload(file, {
@@ -337,26 +439,37 @@ export function createDramaUploadFlow() {
             state.phase = p.phase;
             state.percent = p.total > 0 ? Math.min(100, Math.round((p.uploadedBytes / p.total) * 100)) : 0;
             if (p.expiresAt) state.expiresAt = p.expiresAt;
+            notify();
             persist(
               {
                 session_id: p.sessionId,
                 uploaded_parts: p.uploadedParts,
                 part_count: p.partCount,
                 expires_at: p.expiresAt,
-                complete_pending: p.completePending ? true : undefined,
                 status: p.phase,
               },
               bound,
             );
           },
           onBeforeComplete: () => {
-            if (bound.generation !== state.generation) return;
-            state.completePending = true;
+            if (bound.generation !== state.generation) return false;
+            const ok = persist(
+              { session_id: state.sessionId, complete_pending: true, status: "complete" },
+              bound,
+            );
+            if (!ok) {
+              state.completePending = false;
+              state.error = "无法持久化完成待核对标记，已停止提交完成。请清理浏览器存储后重试同一会话，不要新建上传";
+              notify();
+              return false;
+            }
+            completeSent = true;
             state.phase = "complete";
-            persist({ session_id: state.sessionId, complete_pending: true, status: "complete" }, bound);
+            notify();
+            return true;
           },
         });
-        if (bound.generation !== state.generation) return done;
+        if (bound.generation !== state.generation || boundLifecycle !== state.lifecycle) return done;
         state.sessionId = done.session_id;
         state.percent = 100;
         persist(
@@ -368,24 +481,30 @@ export function createDramaUploadFlow() {
           },
           bound,
         );
+        notify();
         return done;
       } catch (e) {
-        if (bound.generation === state.generation) {
-          if (isDramaCompleteQueryOnly(e) || (e instanceof Error && /结果未知|只查询核对/.test(e.message))) {
-            state.completePending = true;
-            persist({ session_id: state.sessionId, complete_pending: true, status: "complete" }, bound);
-          } else {
+        if (bound.generation === state.generation && boundLifecycle === state.lifecycle) {
+          if (!completeSent) {
+            state.completePending = false;
+          } else if (!isDramaCompleteQueryOnly(e) && classifyDramaCompleteFailure(e) === "business") {
             persist({ session_id: state.sessionId, complete_pending: false }, bound);
+            state.completePending = false;
+          } else {
+            persist({ session_id: state.sessionId, complete_pending: true, status: "complete" }, bound);
+            state.completePending = true;
           }
+          notify();
         }
         throw e;
       } finally {
-        if (bound.generation === state.generation) {
+        if (bound.generation === state.generation && boundLifecycle === state.lifecycle) {
           state.active = false;
+          notify();
         }
       }
     })();
-    op = { generation: bound.generation, identity: bound.identity, abort, done: run };
+    op = { generation: bound.generation, lifecycle: boundLifecycle, identity: bound.identity, abort, done: run };
     return run;
   }
 
@@ -394,21 +513,8 @@ export function createDramaUploadFlow() {
       op.abort.abort();
       op = null;
     }
-    state.generation += 1;
-    state.active = false;
-    state.finalized = false;
-    state.completePending = false;
-    state.identity = null;
-    state.sessionId = "";
-    state.resume = null;
-    state.error = "";
-    state.phase = "idle";
-    state.percent = 0;
-    state.jobId = "";
-    state.jobStatus = "";
-    state.expiresAt = "";
-    state.uploadedParts = undefined;
-    state.partCount = undefined;
+    listeners.clear();
+    beginNewLifecycle();
     clearDramaUploadResume();
   }
 
@@ -422,7 +528,9 @@ export function createDramaUploadFlow() {
     close,
     submit,
     onJobStatus,
+    watchJob,
     reset,
+    subscribe,
     canDiscard,
     canSelectFile,
     isQueryOnly,

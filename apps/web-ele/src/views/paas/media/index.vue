@@ -227,8 +227,20 @@ const dramaUploadResume = ref<DramaUploadResume | null>(null);
 const dramaFileIdent = ref<DramaFileIdentity | null>(null);
 const dramaFlow = getDramaUploadFlow();
 let dramaJobTimer: number | null = null;
+let dramaPollToken = 0;
+let dramaViewLifecycle = dramaFlow.state.lifecycle;
+const dramaFlowActive = ref(false);
+const dramaQueryOnly = ref(false);
+const dramaCanDiscard = ref(false);
+const dramaQuerying = ref(false);
 
 function syncDramaFlow() {
+  if (dramaFlow.state.lifecycle !== dramaViewLifecycle) {
+    // 新生命周期丢弃旧任务的轮询与展示
+    dramaViewLifecycle = dramaFlow.state.lifecycle;
+    stopDramaJobPoll();
+    dramaImportJob.value = null;
+  }
   dramaUploadResume.value = dramaFlow.state.resume;
   dramaUploadSessionId.value = dramaFlow.state.sessionId;
   dramaFileIdent.value = dramaFlow.state.identity;
@@ -236,18 +248,23 @@ function syncDramaFlow() {
   dramaUploadPercent.value = dramaFlow.state.percent;
   if (dramaFlow.state.error) dramaImportError.value = dramaFlow.state.error;
   dramaImporting.value = dramaFlow.state.active;
+  dramaFlowActive.value = dramaFlow.state.active;
+  dramaQueryOnly.value = dramaFlow.isQueryOnly();
+  dramaCanDiscard.value = dramaFlow.canDiscard();
 }
 
+const unbindDramaFlow = dramaFlow.subscribe(syncDramaFlow);
+
 function canDiscardDramaResume() {
-  return dramaFlow.canDiscard();
+  return dramaCanDiscard.value;
 }
 
 function canReselectDramaZip() {
-  return dramaFlow.canSelectFile();
+  return !dramaFlowActive.value;
 }
 
 function dramaPrimaryActionText() {
-  if (dramaFlow.isQueryOnly()) return "核对原会话";
+  if (dramaQueryOnly.value) return "核对原会话";
   if (dramaUploadSessionId.value && !dramaImportJob.value) return "继续上传";
   return "开始导入";
 }
@@ -483,7 +500,7 @@ watch(
   },
 );
 
-onBeforeUnmount(() => { stopDramaJobPoll(); destroyPlayer(); });
+onBeforeUnmount(() => { unbindDramaFlow(); stopDramaJobPoll(); destroyPlayer(); });
 
 async function openDetail(id: string) {
   detailVisible.value = true;
@@ -672,6 +689,7 @@ async function onDeleteEpisode(ep: MediaApi.DramaEpisode) {
 }
 
 function stopDramaJobPoll() {
+  dramaPollToken += 1;
   if (dramaJobTimer != null) {
     window.clearInterval(dramaJobTimer);
     dramaJobTimer = null;
@@ -696,13 +714,14 @@ function dramaJobStatusText(job: MediaApi.DramaImportJob | null) {
   return job.message || job.status;
 }
 
-async function pollDramaImportJob(id: string) {
+async function pollDramaImportJob(id: string, token: number, lifecycle: number) {
   const job = await getDramaImportJobApi(id);
+  // 轮询已停止或生命周期已切换时丢弃迟到响应
+  if (token !== dramaPollToken || lifecycle !== dramaFlow.state.lifecycle) return;
   dramaImportJob.value = job;
   if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
     stopDramaJobPoll();
-    dramaFlow.onJobStatus(job);
-    syncDramaFlow();
+    dramaFlow.onJobStatus(job, { lifecycle });
     if (job.status === "succeeded") {
       pageTab.value = "drama";
       searchForm.kind = 5;
@@ -712,20 +731,20 @@ async function pollDramaImportJob(id: string) {
   }
 }
 
-function startDramaJobPoll(id: string) {
+function startDramaJobPoll(id: string, lifecycle = dramaFlow.state.lifecycle) {
   stopDramaJobPoll();
-  dramaUploadPhase.value = "job";
-  pollDramaImportJob(id).catch((e) => {
-    ElMessage.error(e?.message || "查询导入任务失败");
+  if (!dramaFlow.watchJob(id, { lifecycle })) return;
+  const token = dramaPollToken;
+  pollDramaImportJob(id, token, lifecycle).catch((e) => {
+    if (token === dramaPollToken) ElMessage.error(e?.message || "查询导入任务失败");
   });
   dramaJobTimer = window.setInterval(() => {
-    pollDramaImportJob(id).catch(() => undefined);
+    pollDramaImportJob(id, token, lifecycle).catch(() => undefined);
   }, 2000);
 }
 
 async function discardDramaResume() {
   const result = await dramaFlow.discard();
-  syncDramaFlow();
   if (!result.ok) {
     ElMessage.warning(result.error);
     return;
@@ -739,7 +758,6 @@ async function discardDramaResume() {
 
 async function openDramaImport() {
   const opened = dramaFlow.open();
-  syncDramaFlow();
   if (!opened.restoredActive) {
     stopDramaJobPoll();
     dramaImportFile.value = null;
@@ -769,16 +787,14 @@ async function onDramaZipChange(file: { raw?: File }) {
   const raw = file?.raw || null;
   if (!dramaFlow.canSelectFile()) {
     ElMessage.warning("上传进行中，请等待当前会话结束后再选择文件");
-    syncDramaFlow();
     return;
   }
   const result = await dramaFlow.selectFile(raw);
-  dramaImportFile.value = raw;
+  // 被拒的文件不进入待提交状态，避免与原会话身份混用
+  dramaImportFile.value = result.accepted ? raw : null;
   dramaImportGroups.value = [];
   dramaImportConfirmed.value = false;
   dramaImportError.value = result.error;
-  syncDramaFlow();
-  if (result.error) dramaImportError.value = result.error;
   if (!raw) return;
   if (!result.accepted) return;
   if (dramaFlow.state.jobId && !dramaImportJob.value) {
@@ -805,22 +821,23 @@ async function onDramaZipChange(file: { raw?: File }) {
 }
 
 async function submitDramaImport() {
+  const lifecycle = dramaFlow.state.lifecycle;
   if (dramaFlow.isQueryOnly()) {
-    dramaImporting.value = true;
+    if (dramaQuerying.value) return;
+    dramaQuerying.value = true;
     try {
       const done = await dramaFlow.submit({
         file: dramaImportFile.value,
         plan: dramaImportGroups.value.length ? buildImportPlan(dramaImportGroups.value) : undefined,
         limits: dramaImportLimits.value || defaultDramaImportLimits,
       });
-      syncDramaFlow();
+      if (lifecycle !== dramaFlow.state.lifecycle) return;
       ElMessage.success("已核对到原会话关联的导入任务，无需重新上传。");
-      startDramaJobPoll(done.job_id);
+      startDramaJobPoll(done.job_id, lifecycle);
     } catch (e: any) {
-      syncDramaFlow();
       ElMessage.error(e?.message || "完成结果未知，已改为只查询核对，请不要再次提交完成或新建上传");
     } finally {
-      dramaImporting.value = dramaFlow.state.active;
+      dramaQuerying.value = false;
     }
     return;
   }
@@ -863,15 +880,14 @@ async function submitDramaImport() {
       plan: buildImportPlan(dramaImportGroups.value),
       limits: dramaImportLimits.value || defaultDramaImportLimits,
     });
-    syncDramaFlow();
+    if (lifecycle !== dramaFlow.state.lifecycle) return;
     if (done.recovered) {
       ElMessage.success("已核对到原会话关联的导入任务，无需重新上传。");
     } else {
       ElMessage.success("分片已提交，后台正在导入。入库完成不等于全部转码完成。");
     }
-    startDramaJobPoll(done.job_id);
+    startDramaJobPoll(done.job_id, lifecycle);
   } catch (e: any) {
-    syncDramaFlow();
     ElMessage.error(e?.message || "上传中断，已保留原会话，可选择同一文件继续");
   } finally {
     dramaImporting.value = dramaFlow.state.active;
@@ -880,18 +896,19 @@ async function submitDramaImport() {
 
 function onDramaImportClosed() {
   dramaFlow.close();
-  syncDramaFlow();
   stopDramaJobPoll();
 }
 
 async function retryDramaImport() {
   const job = dramaImportJob.value;
   if (!job?.id) return;
+  const lifecycle = dramaFlow.state.lifecycle;
   try {
     const next = await retryDramaImportJobApi(job.id);
+    if (lifecycle !== dramaFlow.state.lifecycle) return;
     dramaImportJob.value = next;
     ElMessage.success("已提交重试");
-    startDramaJobPoll(next.id);
+    startDramaJobPoll(next.id, lifecycle);
   } catch (e: any) {
     ElMessage.error(e?.message || "重试失败");
   }
@@ -1489,7 +1506,7 @@ onMounted(() => {
         >
           重试失败步骤
         </ElButton>
-        <ElButton type="primary" :loading="dramaImporting" :disabled="(dramaFlow.isQueryOnly() ? false : (!!dramaImportError || !dramaImportFile)) || dramaUploadPhase === 'job' || dramaFlow.state.active" @click="submitDramaImport">
+        <ElButton type="primary" :loading="dramaImporting || dramaQuerying" :disabled="(dramaQueryOnly ? false : (!!dramaImportError || !dramaImportFile)) || dramaUploadPhase === 'job' || dramaFlowActive || dramaQuerying" @click="submitDramaImport">
           {{ dramaPrimaryActionText() }}
         </ElButton>
       </template>

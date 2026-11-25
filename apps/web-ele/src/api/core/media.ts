@@ -441,6 +441,44 @@ function formatBytesShort(n: number) {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
+export class MediaHttpError extends Error {
+  status: number;
+  structured: boolean;
+  code?: number;
+  constructor(message: string, status: number, structured: boolean, code?: number) {
+    super(message);
+    this.name = "MediaHttpError";
+    this.status = status;
+    this.structured = structured;
+    this.code = code;
+  }
+}
+
+export function isTransportLikeError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof TypeError) return true;
+  const name = err instanceof Error ? err.name : "";
+  const msg = err instanceof Error ? err.message : String(err);
+  if (name === "AbortError" || name === "TimeoutError") return true;
+  if (/Failed to fetch|Load failed|NetworkError|network|ERR_NETWORK|ECONNRESET|ETIMEDOUT/i.test(msg)) {
+    return true;
+  }
+  if (msg.includes("结果未知") || msg.includes("完成导入任务超时") || msg.includes("只查询核对")) return true;
+  return false;
+}
+
+export function isDramaCompleteBusinessError(err: unknown): boolean {
+  if (!(err instanceof MediaHttpError)) return false;
+  if (!err.structured) return false;
+  if (err.status === 408 || err.status === 429) return false;
+  if (err.status < 400 || err.status >= 500) return false;
+  return err.code !== undefined && err.code !== 0;
+}
+
+export function classifyDramaCompleteFailure(err: unknown): "business" | "unknown" {
+  return isDramaCompleteBusinessError(err) ? "business" : "unknown";
+}
+
 async function fetchMediaJSON<T>(
   input: string,
   init: RequestInit,
@@ -479,7 +517,11 @@ async function fetchMediaJSON<T>(
     if (res && (res.status === 504 || res.status === 408)) {
       throw new Error(timeoutMsg);
     }
-    throw new Error(text?.slice(0, 120) || `请求失败 HTTP ${res?.status ?? 0}`);
+    throw new MediaHttpError(
+      text?.slice(0, 120) || `请求失败 HTTP ${res?.status ?? 0}`,
+      res?.status ?? 0,
+      false,
+    );
   }
   // 先判定结构化成功，避免标题等字段命中 timeout 字样
   if (json && res && res.ok && json.code === 0) {
@@ -488,7 +530,12 @@ async function fetchMediaJSON<T>(
   if (res && (res.status === 504 || res.status === 408)) {
     throw new Error(timeoutMsg);
   }
-  throw new Error(json?.message || `请求失败 HTTP ${res?.status ?? 0}`);
+  throw new MediaHttpError(
+    json?.message || `请求失败 HTTP ${res?.status ?? 0}`,
+    res?.status ?? 0,
+    true,
+    json?.code,
+  );
 }
 
 export function createDramaUploadApi(body: { filename: string; total_size: number }) {
@@ -644,7 +691,7 @@ export async function uploadDramaZipAndEnqueue(
     identity?: { filename: string; total_size: number; last_modified: number; digest: string };
     completePending?: boolean;
     signal?: AbortSignal;
-    onBeforeComplete?: () => void;
+    onBeforeComplete?: () => boolean | Promise<boolean>;
     onProgress?: (p: DramaUploadProgress) => void;
   },
 ): Promise<{
@@ -786,14 +833,19 @@ export async function uploadDramaZipAndEnqueue(
   if (opts.signal?.aborted) {
     throw new Error("已终止本次上传");
   }
-  const pendingMark = () => {
+  const pendingMark = async () => {
     emit(sess.id, file.size, "complete", {
       uploadedParts: sess.part_count,
       partCount: sess.part_count,
       expiresAt: sess.expires_at,
       completePending: true,
     });
-    opts.onBeforeComplete?.();
+    const ok = await Promise.resolve(opts.onBeforeComplete?.());
+    if (ok !== true) {
+      throw new Error(
+        "无法持久化完成待核对标记，已停止提交完成。请清理浏览器存储后重试同一会话，不要新建上传",
+      );
+    }
   };
   if (opts.completePending) {
     try {
@@ -812,7 +864,7 @@ export async function uploadDramaZipAndEnqueue(
     }
     throw new DramaCompleteUnknownError(sess.id);
   }
-  pendingMark();
+  await pendingMark();
   try {
     const done = await completeDramaUploadApi(
       sess.id,
@@ -826,13 +878,10 @@ export async function uploadDramaZipAndEnqueue(
       // 若已发出或已标记 pending，中止也按结果未知、只查询处理
       throw new DramaCompleteUnknownError(sess.id);
     }
-    const definite =
-      e instanceof Error &&
-      !isDramaCompleteQueryOnly(e) &&
-      !e.message.includes("完成导入任务超时") &&
-      !e.message.includes("结果未知") &&
-      !/Failed to fetch|NetworkError/i.test(e.message);
-    if (definite) {
+    if (e instanceof Error && e.message.includes("无法持久化完成待核对标记")) {
+      throw e;
+    }
+    if (classifyDramaCompleteFailure(e) === "business") {
       throw e;
     }
     try {
